@@ -1,0 +1,1311 @@
+# Full Implementation Prompt: Custom Schema OCR System (HTTP/HTTPS URL Input)
+
+## Target Stack: NestJS (Backend) + React (Frontend)
+## Core Constraint: Document input is **ALWAYS an HTTP/HTTPS URL** (e.g. S3, Cloudflare R2, Cloud Storage, or CDN URL). No multipart/raw file handling in the OCR endpoint.
+
+---
+
+## What To Build
+
+Build a **Custom Schema OCR** microservice/module where:
+1. The client sends an **HTTP/HTTPS URL** pointing to a document (PDF or Image) and a **custom JSON schema** specifying the exact fields to extract.
+2. The backend downloads the document via HTTP, detects MIME type (PNG, JPG, WebP, PDF), executes OCR (PaddleOCR via ONNX / MuPDF text layer with OCR fallback), and parses the text using a 13-category intelligent heuristic engine.
+3. The extracted fields are returned as a flat JSON dictionary matching the user's custom schema keys and auto-filled into the React UI.
+
+---
+
+## Part 1: NestJS Backend
+
+### 1.1 Module Structure
+
+```
+src/
+└── ocr/
+    ├── ocr.module.ts            # NestJS module registration
+    ├── ocr.controller.ts        # POST /api/ocr/extract endpoint
+    ├── ocr.service.ts           # Orchestrator: HTTP download → MIME detect → OCR → parse
+    ├── image.service.ts         # Sharp preprocessing + PaddleOCR engine (singleton)
+    ├── pdf.service.ts           # MuPDF text extraction + OCR fallback for scanned pages
+    ├── parser.service.ts        # Custom schema heuristic field extractor (13 categories)
+    ├── dto/
+    │   ├── ocr-extract.dto.ts   # Request DTO with class-validator (@IsUrl)
+    │   └── ocr-response.dto.ts  # Response interfaces
+    └── types/
+        └── ocr.types.ts         # Enums, interfaces
+```
+
+### 1.2 Types & Enums — `ocr.types.ts`
+
+```typescript
+export enum DocumentType {
+  PAN_CARD = 'PAN_CARD',
+  AADHAAR_CARD = 'AADHAAR_CARD',
+  ELECTRICITY_BILL = 'ELECTRICITY_BILL',
+  PROJECT_REPORT = 'PROJECT_REPORT',
+  UDYAM_REGISTRATION_CERTIFICATE = 'UDYAM_REGISTRATION_CERTIFICATE',
+  GST_CERTIFICATE = 'GST_CERTIFICATE',
+  BIRTH_CERTIFICATE = 'BIRTH_CERTIFICATE',
+  LOAN_SANCTION_LETTER = 'LOAN_SANCTION_LETTER',
+  BALANCE_SHEET_REPORT = 'BALANCE_SHEET_REPORT',
+  CUSTOM = 'CUSTOM',
+}
+
+export type SupportedMimeType =
+  | 'image/jpeg'
+  | 'image/png'
+  | 'image/webp'
+  | 'application/pdf';
+
+export const SUPPORTED_IMAGE_MIMES: SupportedMimeType[] = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+];
+
+export const SUPPORTED_PDF_MIME: SupportedMimeType = 'application/pdf';
+
+export interface OcrResult {
+  text: string;
+  confidence?: number;
+}
+
+export interface PdfProcessingResult {
+  text: string;
+  pages: number;
+  isSearchable: boolean;
+}
+```
+
+### 1.3 Request & Response DTOs — `dto/ocr-extract.dto.ts`
+
+```typescript
+import { IsString, IsNotEmpty, IsOptional, IsObject, IsUrl } from 'class-validator';
+
+export class OcrExtractDto {
+  @IsUrl(
+    { protocols: ['http', 'https'], require_protocol: true },
+    { message: 'fileUrl must be a valid public HTTP or HTTPS URL (e.g. S3/CDN/Storage URL)' },
+  )
+  @IsNotEmpty({ message: 'fileUrl is required' })
+  fileUrl: string;
+
+  @IsString()
+  @IsNotEmpty({ message: 'documentType is required (e.g. "CUSTOM" or standard document type)' })
+  documentType: string;
+
+  @IsOptional()
+  @IsObject({ message: 'customSchema must be a valid JSON object or array' })
+  customSchema?: any;
+}
+
+export interface OcrExtractResponse {
+  success: boolean;
+  text: string;
+  fields: Record<string, string>;
+  pages: number;
+  processingTimeMs: number;
+  documentType: string;
+  error?: string;
+}
+```
+
+### 1.4 Module — `ocr.module.ts`
+
+```typescript
+import { Module } from '@nestjs/common';
+import { OcrController } from './ocr.controller';
+import { OcrService } from './ocr.service';
+import { ImageService } from './image.service';
+import { PdfService } from './pdf.service';
+import { ParserService } from './parser.service';
+
+@Module({
+  controllers: [OcrController],
+  providers: [OcrService, ImageService, PdfService, ParserService],
+  exports: [OcrService],
+})
+export class OcrModule {}
+```
+
+### 1.5 Controller — `ocr.controller.ts`
+
+```typescript
+import { Controller, Post, Body, HttpCode, Logger } from '@nestjs/common';
+import { OcrExtractDto, OcrExtractResponse } from './dto/ocr-extract.dto';
+import { OcrService } from './ocr.service';
+import { DocumentType } from './types/ocr.types';
+
+@Controller('api/ocr')
+export class OcrController {
+  private readonly logger = new Logger(OcrController.name);
+
+  constructor(private readonly ocrService: OcrService) {}
+
+  @Post('extract')
+  @HttpCode(200)
+  async extract(@Body() dto: OcrExtractDto): Promise<OcrExtractResponse> {
+    const requestId = `ocr-${Date.now()}`;
+    this.logger.log(`[${requestId}] Processing URL: ${dto.fileUrl} | type: ${dto.documentType}`);
+
+    // If no customSchema is provided, validate documentType against built-in enum
+    if (!dto.customSchema) {
+      const validTypes = Object.values(DocumentType);
+      if (!validTypes.includes(dto.documentType as DocumentType)) {
+        return {
+          success: false,
+          text: '',
+          fields: {},
+          pages: 0,
+          processingTimeMs: 0,
+          documentType: dto.documentType,
+          error: `Unknown documentType: "${dto.documentType}". Valid types: ${validTypes.join(', ')}`,
+        };
+      }
+    }
+
+    const result = await this.ocrService.extractDocument({
+      fileUrl: dto.fileUrl,
+      documentType: dto.documentType,
+      customSchema: dto.customSchema,
+    });
+
+    this.logger.log(
+      `[${requestId}] Finished: success=${result.success}, fieldsExtracted=${Object.keys(result.fields).length}, duration=${result.processingTimeMs}ms`,
+    );
+
+    return result;
+  }
+}
+```
+
+### 1.6 OCR Service (HTTP Downloader + Pipeline Orchestrator) — `ocr.service.ts`
+
+```typescript
+import { Injectable, Logger } from '@nestjs/common';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { randomUUID } from 'node:crypto';
+import axios from 'axios';
+import { ImageService } from './image.service';
+import { PdfService } from './pdf.service';
+import { ParserService } from './parser.service';
+import {
+  SUPPORTED_IMAGE_MIMES,
+  SUPPORTED_PDF_MIME,
+  type SupportedMimeType,
+} from './types/ocr.types';
+import type { OcrExtractResponse } from './dto/ocr-extract.dto';
+
+@Injectable()
+export class OcrService {
+  private readonly logger = new Logger(OcrService.name);
+  private readonly tmpDir = path.join(os.tmpdir(), 'ocr-microservice');
+
+  constructor(
+    private readonly imageService: ImageService,
+    private readonly pdfService: PdfService,
+    private readonly parserService: ParserService,
+  ) {
+    if (!fs.existsSync(this.tmpDir)) {
+      fs.mkdirSync(this.tmpDir, { recursive: true });
+    }
+  }
+
+  async extractDocument(request: {
+    fileUrl: string;
+    documentType: string;
+    customSchema?: any;
+  }): Promise<OcrExtractResponse> {
+    const startTime = Date.now();
+    let tempFilePath: string | null = null;
+
+    try {
+      // Step 1: Download file via HTTP/HTTPS
+      const { filePath, buffer } = await this.downloadHttpFile(request.fileUrl);
+      tempFilePath = filePath;
+
+      // Step 2: Detect MIME type via magic bytes + URL extension
+      const mimeType = await this.detectMimeType(buffer, request.fileUrl);
+
+      // Step 3: Run OCR based on MIME type
+      let rawText = '';
+      let pageCount = 1;
+
+      if (mimeType === SUPPORTED_PDF_MIME) {
+        const pdfResult = await this.pdfService.processPdf(buffer);
+        rawText = pdfResult.text;
+        pageCount = pdfResult.pages;
+      } else {
+        const ocrResult = await this.imageService.recognizeImage(buffer);
+        rawText = ocrResult.text;
+      }
+
+      this.logger.log(`OCR extraction yielded ${rawText.length} characters across ${pageCount} page(s)`);
+
+      // Step 4: Parse fields via custom schema
+      const fields = this.parserService.parseFields(
+        rawText,
+        request.documentType,
+        request.customSchema,
+      );
+
+      const processingTimeMs = Date.now() - startTime;
+
+      return {
+        success: true,
+        text: rawText,
+        fields,
+        pages: pageCount,
+        processingTimeMs,
+        documentType: request.documentType,
+      };
+    } catch (err: any) {
+      const processingTimeMs = Date.now() - startTime;
+      this.logger.error(`OCR Extraction failed after ${processingTimeMs}ms: ${err.message}`);
+
+      return {
+        success: false,
+        text: '',
+        fields: {},
+        pages: 0,
+        processingTimeMs,
+        documentType: request.documentType,
+        error: err.message,
+      };
+    } finally {
+      // Step 5: Clean up temp file
+      if (tempFilePath && fs.existsSync(tempFilePath)) {
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch {}
+      }
+    }
+  }
+
+  /**
+   * Downloads remote document from HTTP/HTTPS URL into Buffer and temp file.
+   */
+  private async downloadHttpFile(fileUrl: string): Promise<{ filePath: string; buffer: Buffer }> {
+    const response = await axios.get(fileUrl, {
+      responseType: 'arraybuffer',
+      timeout: 60_000, // 60s timeout for large PDF downloads
+      maxContentLength: 50 * 1024 * 1024, // 50MB max file size
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; NestJSOcrBot/1.0)',
+      },
+    });
+
+    const buffer = Buffer.from(response.data);
+
+    let ext = '.bin';
+    try {
+      ext = path.extname(new URL(fileUrl).pathname).toLowerCase() || '.bin';
+    } catch {}
+
+    const filePath = path.join(this.tmpDir, `${randomUUID()}${ext}`);
+    fs.writeFileSync(filePath, buffer);
+    return { filePath, buffer };
+  }
+
+  /**
+   * Detects MIME type using magic bytes from buffer, falling back to URL pathname extension.
+   */
+  private async detectMimeType(buffer: Buffer, fileUrl: string): Promise<SupportedMimeType> {
+    const { fileTypeFromBuffer } = await import('file-type');
+    const detected = await fileTypeFromBuffer(buffer);
+
+    if (detected) {
+      const mime = detected.mime as SupportedMimeType;
+      if (SUPPORTED_IMAGE_MIMES.includes(mime) || mime === SUPPORTED_PDF_MIME) {
+        return mime;
+      }
+    }
+
+    try {
+      const ext = path.extname(new URL(fileUrl).pathname).toLowerCase();
+      const extMap: Record<string, SupportedMimeType> = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+        '.pdf': 'application/pdf',
+      };
+      if (extMap[ext]) return extMap[ext];
+    } catch {}
+
+    throw new Error(`Unsupported file type from URL: "${fileUrl}". Detected MIME: ${detected?.mime ?? 'unknown'}`);
+  }
+}
+```
+
+### 1.7 Image Service (Sharp Preprocessing + PaddleOCR) — `image.service.ts`
+
+```typescript
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import type { OcrResult } from './types/ocr.types';
+
+@Injectable()
+export class ImageService implements OnModuleDestroy {
+  private readonly logger = new Logger(ImageService.name);
+  private paddleOcrInstance: any = null;
+  private initPromise: Promise<void> | null = null;
+
+  private async ensureOcrReady() {
+    if (this.paddleOcrInstance) return this.paddleOcrInstance;
+
+    if (!this.initPromise) {
+      this.initPromise = (async () => {
+        this.logger.log('Initializing PaddleOCR engine (downloads ~50MB ONNX models on initial run)...');
+        const { PaddleOcrService } = await import('ppu-paddle-ocr');
+        this.paddleOcrInstance = new PaddleOcrService();
+        await this.paddleOcrInstance.initialize();
+        this.logger.log('PaddleOCR engine ready.');
+      })();
+    }
+
+    await this.initPromise;
+    return this.paddleOcrInstance;
+  }
+
+  private async preprocessImage(buffer: Buffer): Promise<Buffer> {
+    const sharp = (await import('sharp')).default;
+    const image = sharp(buffer);
+    const metadata = await image.metadata();
+
+    let pipeline = image;
+
+    // Upscale small/low-res images (< 1200px) to boost OCR accuracy
+    if (metadata.width && metadata.width < 1200) {
+      const scaleFactor = Math.min(3, Math.max(1.5, 1200 / metadata.width));
+      pipeline = pipeline.resize({
+        width: Math.round(metadata.width * scaleFactor),
+        kernel: 'lanczos3',
+      });
+    }
+
+    return pipeline.greyscale().normalize().sharpen().png().toBuffer();
+  }
+
+  async recognizeImage(imageBuffer: Buffer): Promise<OcrResult> {
+    const service = await this.ensureOcrReady();
+    if (!service) throw new Error('PaddleOCR service failed to initialize');
+
+    let text = '';
+
+    // Attempt 1: Preprocessed image (greyscale, sharpened, scaled)
+    try {
+      const processedBuffer = await this.preprocessImage(imageBuffer);
+      const result = await service.recognize(processedBuffer.buffer as ArrayBuffer);
+      text = result.text ?? '';
+    } catch {
+      this.logger.warn('Preprocessed OCR recognition failed, attempting raw image buffer fallback...');
+    }
+
+    // Attempt 2: Fallback to raw buffer if preprocessed returned < 5 characters
+    if (!text || text.trim().length < 5) {
+      try {
+        const rawResult = await service.recognize(imageBuffer.buffer as ArrayBuffer);
+        if (rawResult.text && rawResult.text.length > text.length) {
+          text = rawResult.text;
+        }
+      } catch {}
+    }
+
+    return { text: text ?? '' };
+  }
+
+  async onModuleDestroy() {
+    if (this.paddleOcrInstance) {
+      await this.paddleOcrInstance.destroy();
+      this.paddleOcrInstance = null;
+      this.initPromise = null;
+      this.logger.log('PaddleOCR engine cleanly destroyed.');
+    }
+  }
+}
+```
+
+### 1.8 PDF Service (MuPDF WASM Text Layer + Scanned OCR) — `pdf.service.ts`
+
+```typescript
+import { Injectable, Logger } from '@nestjs/common';
+import { ImageService } from './image.service';
+import type { PdfProcessingResult } from './types/ocr.types';
+
+const MIN_TEXT_LENGTH = 20;
+
+@Injectable()
+export class PdfService {
+  private readonly logger = new Logger(PdfService.name);
+
+  constructor(private readonly imageService: ImageService) {}
+
+  async processPdf(pdfBuffer: Buffer): Promise<PdfProcessingResult> {
+    const mupdf = await import('mupdf');
+    const doc = mupdf.Document.openDocument(pdfBuffer, 'application/pdf');
+    const pageCount = doc.countPages();
+    const pageTexts: string[] = [];
+    let isSearchable = true;
+
+    try {
+      for (let i = 0; i < pageCount; i++) {
+        const page = doc.loadPage(i);
+
+        try {
+          // Pass 1: Extract native text if searchable PDF
+          const structuredText = page.toStructuredText('preserve-whitespace');
+          const jsonStr = structuredText.asJSON();
+          const plainText = this.extractPlainText(jsonStr);
+
+          if (plainText.length >= MIN_TEXT_LENGTH) {
+            pageTexts.push(`--- Page ${i + 1} ---\n${plainText}`);
+          } else {
+            // Pass 2: Scanned PDF page -> render to 2x DPI PNG and run PaddleOCR
+            isSearchable = false;
+            const pixmap = page.toPixmap(
+              mupdf.Matrix.scale(2, 2),
+              mupdf.ColorSpace.DeviceRGB,
+              false,
+              true,
+            );
+
+            try {
+              const pngBuffer = Buffer.from(pixmap.asPNG());
+              const ocrResult = await this.imageService.recognizeImage(pngBuffer);
+              pageTexts.push(`--- Page ${i + 1} (Scanned OCR) ---\n${ocrResult.text}`);
+            } finally {
+              pixmap.destroy();
+            }
+          }
+        } finally {
+          page.destroy();
+        }
+      }
+    } finally {
+      doc.destroy();
+    }
+
+    return { text: pageTexts.join('\n\n'), pages: pageCount, isSearchable };
+  }
+
+  private extractPlainText(jsonStr: string): string {
+    try {
+      const data = JSON.parse(jsonStr);
+      const blocks = data.blocks ?? data;
+      const lines: string[] = [];
+
+      for (const block of blocks) {
+        if (block.type === 'text' && block.lines) {
+          for (const line of block.lines) {
+            const lineText = (line.spans ?? []).map((s: any) => s.text ?? '').join('');
+            if (lineText.trim()) lines.push(lineText.trim());
+          }
+        }
+      }
+      return lines.join('\n');
+    } catch {
+      return '';
+    }
+  }
+}
+```
+
+### 1.9 Parser Service (13-Category Custom Schema Engine) — `parser.service.ts`
+
+```typescript
+import { Injectable, Logger } from '@nestjs/common';
+
+@Injectable()
+export class ParserService {
+  private readonly logger = new Logger(ParserService.name);
+
+  parseFields(
+    rawText: string,
+    documentType: string,
+    customSchema?: any,
+  ): Record<string, string> {
+    if (customSchema) {
+      const result = this.parseCustomSchema(rawText, customSchema);
+      if (Object.keys(result).length > 0) return result;
+    }
+
+    if (customSchema) {
+      return this.parseCustomSchema(rawText, customSchema);
+    }
+
+    this.logger.warn(`No schema or template provided for documentType: ${documentType}`);
+    return {};
+  }
+
+  parseCustomSchema(rawText: string, customSchema: any): Record<string, string> {
+    const fields: Record<string, string> = {};
+    if (!customSchema || typeof customSchema !== 'object') return fields;
+
+    const fieldList = this.flattenSchema(customSchema);
+    const lines = rawText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+
+    for (const fieldDef of fieldList) {
+      const title = fieldDef.title;
+      if (!title) continue;
+
+      const normTitle = title.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const isNumericField = this.isFinancialOrNumericTitle(title, fieldDef.type);
+      let extractedValue: string | null = null;
+
+      // ─── 1. Document Metadata ───
+      if (/doc(?:ument)?type/i.test(title) || normTitle === 'documenttype') {
+        const m = rawText.match(/\b(PAN\s*CARD|AADHAAR(?:\s*CARD)?|TAX\s*INVOICE|INVOICE|GST\s*CERTIFICATE|REGISTRATION\s*CERTIFICATE|UDYAM\s*REGISTRATION|BIRTH\s*CERTIFICATE|ELECTRICITY\s*BILL|PROJECT\s*REPORT|BALANCE\s*SHEET|LOAN\s*SANCTION\s*LETTER|DRIVING\s*LICEN[SC]E|PASSPORT)\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle === 'status' || normTitle === 'documentstatus') {
+        const m = rawText.match(/\b(ACTIVE|INACTIVE|VERIFIED|APPROVED|COMPLETED|VALID|CANCELLED|PENDING|REJECTED|REGISTERED|REGULAR|COMPOSITION|PAID|UNPAID)\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      }
+
+      // ─── 2. National Identifiers & Codes ───
+      else if (normTitle.includes('pan') || normTitle === 'permanentaccountnumber') {
+        const m = rawText.match(/\b([A-Z]{5}[0-9]{4}[A-Z])\b/);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle.includes('aadhaar') || normTitle.includes('adhaar') || normTitle.includes('adhar') || normTitle.includes('uid')) {
+        const m = rawText.match(/\b([1-9]\d{3}\s?\d{4}\s?\d{4})\b/) || rawText.match(/\b(\d{4}\s?\d{4}\s?\d{4})\b/);
+        if (m) extractedValue = this.formatAadhaar(m[1]);
+      } else if (normTitle.includes('gstin') || normTitle === 'gst' || normTitle.includes('gstnumber')) {
+        const m = rawText.match(/\b(\d{2}[A-Z]{5}\d{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle.includes('udyam') || normTitle.includes('uam')) {
+        const m = rawText.match(/\b(UDYAM-[A-Z0-9\-]{5,25})\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle.includes('passport')) {
+        const m = rawText.match(/\b([A-PR-WYa-pr-wy][1-9]\d\s?\d{4}[1-9]|[A-Z][0-9]{7,8})\b/i);
+        if (m) extractedValue = m[1].toUpperCase().replace(/\s/g, '');
+      } else if (normTitle.includes('voter') || normTitle.includes('epic')) {
+        const m = rawText.match(/\b([A-Z]{3}[0-9]{7})\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle.includes('driving') || normTitle.includes('dlno') || normTitle === 'dl') {
+        const m = rawText.match(/\b([A-Z]{2}[0-9]{2}\s?[0-9]{4,11})\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle.includes('ifsc')) {
+        const m = rawText.match(/\b([A-Z]{4}0[A-Z0-9]{6})\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle === 'cin' || normTitle.includes('corporateid')) {
+        const m = rawText.match(/\b([LU][0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9]{6})\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      }
+
+      // ─── 3. Contact & Demographics ───
+      else if (normTitle.includes('mobile') || normTitle.includes('phone') || normTitle.includes('contact')) {
+        const matches = [...rawText.matchAll(/(?:\+91[\s-]?)?\b([6-9]\d{9})\b/g)].map((m) => m[1]);
+        const isAlt = normTitle.includes('alt') || normTitle.includes('second');
+        if (isAlt && matches.length > 1) extractedValue = matches[1];
+        else if (matches.length > 0) extractedValue = matches[0];
+      } else if (normTitle.includes('email')) {
+        const m = rawText.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+        if (m) extractedValue = m[1].toLowerCase();
+      } else if (normTitle.includes('gender') || normTitle === 'sex') {
+        const m = rawText.match(/\b(MALE|FEMALE|TRANSGENDER|पुरुष|महिला)\b/i);
+        if (m) extractedValue = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+      } else if (normTitle === 'age') {
+        const m = rawText.match(/(?:Age|आयु)\s*[:/]?\s*(\d{1,3})\s*(?:Yrs?|Years?)?/i);
+        if (m) extractedValue = m[1];
+      } else if (normTitle.includes('marital')) {
+        const m = rawText.match(/\b(Married|Unmarried|Single|Divorced|Widowed)\b/i);
+        if (m) extractedValue = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+      }
+
+      // ─── 4. Vehicle & Property ───
+      else if (normTitle.includes('vehicleno') || normTitle.includes('vehiclenumber')) {
+        const m = rawText.match(/\b([A-Z]{2}[0-9]{1,2}(?:\s?[A-Z]{1,3})?\s?[0-9]{3,4})\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle.includes('chassis') || normTitle === 'vin') {
+        const m = rawText.match(/\b([A-HJ-NPR-Z0-9]{17})\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle.includes('fuel')) {
+        const m = rawText.match(/\b(PETROL|DIESEL|CNG|ELECTRIC|HYBRID|LPG)\b/i);
+        if (m) extractedValue = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+      }
+
+      // ─── 5. Banking & Utility Numbers ───
+      else if (normTitle === 'accountnumber' || normTitle === 'bankaccountnumber' || normTitle === 'accno') {
+        const m = rawText.match(/(?:Account\s*(?:No|Number)?|A\/c\s*No\.?)\s*[:/]?\s*(\d{9,18})\b/i) || rawText.match(/\b(\d{11,18})\b/);
+        if (m) extractedValue = m[1];
+      } else if (normTitle.includes('consumerno') || normTitle.includes('consumernumber')) {
+        const m = rawText.match(/(?:Consumer\s*(?:No|Number))\s*[:/]?\s*(\d{7,16})/i);
+        if (m) extractedValue = m[1];
+      } else if (normTitle.includes('meterno') || normTitle.includes('meternumber')) {
+        const m = rawText.match(/(?:Meter\s*(?:No|Number)?)\s*[:/]?\s*([A-Za-z0-9]{6,12})/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (
+        normTitle.includes('invoiceno') ||
+        normTitle.includes('billno') ||
+        normTitle.includes('receiptno') ||
+        normTitle.includes('certificateno') ||
+        normTitle.includes('applicationno')
+      ) {
+        extractedValue = this.extractFromLineContext(lines, [normTitle], [], false, false);
+      }
+
+      // ─── 6. Organization & Business Types ───
+      else if (normTitle.includes('organisation') || normTitle.includes('constitution') || normTitle.includes('businesstype')) {
+        const m = rawText.match(/\b(Proprietary|Proprietorship|Private\s*Limited(?:\s*Company)?|Partnership|Public\s*Limited(?:\s*Company)?|LLP|HUF|Individual|Trust|Society)\b/i);
+        if (m) extractedValue = m[0].trim();
+      } else if (normTitle.includes('enterprisetype') || normTitle.includes('categoryenterprise')) {
+        const m = rawText.match(/(?:Enterprise\s*Type|Type\s*of\s*Enterprise|Category\s*Enterprise)\s*[:/]?\s*(Micro|Small|Medium)/i);
+        if (m) extractedValue = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+      }
+
+      // ─── 7. Business & Entity Names ───
+      else if ((normTitle.includes('bank') || normTitle === 'bankname') && !normTitle.includes('account') && !normTitle.includes('loan')) {
+        const m = rawText.match(/\b(STATE\s*BANK\s*OF\s*INDIA|HDFC\s*BANK|ICICI\s*BANK|AXIS\s*BANK|BANK\s*OF\s*BARODA|CANARA\s*BANK|CENTRAL\s*BANK|PUNJAB\s*NATIONAL\s*BANK|UNION\s*BANK|KOTAK(?:\s*MAHINDRA)?(?:\s*BANK)?|YES\s*BANK|IDBI(?:\s*BANK)?|INDUSIND(?:\s*BANK)?|BANDHAN\s*BANK|SIDBI|UCO\s*BANK|INDIAN\s*OVERSEAS\s*BANK|FEDERAL\s*BANK)\b/i);
+        if (m) extractedValue = m[1].toUpperCase();
+      } else if (normTitle.includes('companyname') || normTitle.includes('firmname') || normTitle.includes('enterprisename')) {
+        extractedValue = this.extractFromLineContext(lines, [normTitle, 'enterprise', 'companyname', 'firmname'], ['address', 'date', 'account', 'branch', 'bank'], true, false);
+      }
+
+      // ─── 8. Family & Role-Based Names ───
+      else if (normTitle.includes('father')) {
+        extractedValue = this.extractFromLineContext(lines, ['fathername', 'fathersname', 'father', 'पिताकानाम'], [], true, false);
+        if (!extractedValue) {
+          const m = rawText.match(/(?:Father'?s?\s*Name|पिता\s*का\s*नाम)\s*[:/]?\s*([A-Za-z\s.']{2,40})/i);
+          if (m && !this.isBlacklistedName(m[1])) extractedValue = m[1].trim();
+        }
+      } else if (normTitle.includes('mother')) {
+        extractedValue = this.extractFromLineContext(lines, ['mothername', 'mother', 'माताकानाम'], [], true, false);
+      } else if (normTitle.includes('spouse') || normTitle.includes('husband') || normTitle.includes('wife') || normTitle.includes('nominee')) {
+        extractedValue = this.extractFromLineContext(lines, [normTitle, 'spouse', 'nominee'], [], true, false);
+      } else if (normTitle.includes('borrower') || normTitle.includes('applicant') || normTitle.includes('proprietor') || normTitle.includes('director')) {
+        extractedValue = this.extractFromLineContext(lines, [normTitle], ['address', 'date', 'father', 'mother'], true, false);
+      }
+
+      // ─── 9. Address & Geography ───
+      else if (normTitle.includes('address') || normTitle.includes('principalplace')) {
+        extractedValue = this.extractFromLineContext(lines, ['address', 'fulladdress', 'addressline1', 'billingaddress'], ['email', 'web'], false, false);
+        if (!extractedValue) {
+          const m = rawText.match(/(?:Address|ADDR|पता)\s*[:/]?\s*([\s\S]{5,350}?)(?=\s*Sub-division|\s*Consumer\s*No|\s*Meter\s*No|\s*DATE|\s*\d{2}[\/\-\.]\d{2}[\/\-\.]\d{4}|$)/i);
+          if (m) extractedValue = this.cleanAddress(m[1]);
+        }
+      } else if (normTitle.includes('pincode') || normTitle.includes('postalcode') || normTitle === 'pin') {
+        const m = rawText.match(/\b([1-9][0-9]{5})\b/);
+        if (m) extractedValue = m[1];
+      } else if (['city', 'district', 'state', 'taluka', 'village', 'area', 'country'].includes(normTitle)) {
+        extractedValue = this.extractFromLineContext(lines, [normTitle], [], false, false);
+      }
+
+      // ─── 10. Dates ───
+      else if (normTitle.includes('date') || fieldDef.type === 'date' || normTitle.includes('dob') || normTitle.includes('validto')) {
+        for (let i = 0; i < lines.length; i++) {
+          const lineNorm = lines[i].toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (lineNorm.includes(normTitle) || (normTitle.includes('birth') && lineNorm.includes('birth')) || (normTitle.includes('issue') && lineNorm.includes('issue'))) {
+            const dateMatch = lines[i].match(/\b(\d{2}[\/\-\.]\d{2}[\/\-\.]\d{4}|\d{4}[\/\-\.]\d{2}[\/\-\.]\d{2})\b/);
+            if (dateMatch) {
+              extractedValue = dateMatch[1];
+              break;
+            }
+            if (i + 1 < lines.length) {
+              const nextDate = lines[i + 1].match(/\b(\d{2}[\/\-\.]\d{2}[\/\-\.]\d{4})\b/);
+              if (nextDate) {
+                extractedValue = nextDate[1];
+                break;
+              }
+            }
+          }
+        }
+        if (!extractedValue) {
+          const anyDate = rawText.match(/\b(\d{2}[\/\-\.]\d{2}[\/\-\.]\d{4})\b/);
+          if (anyDate) extractedValue = anyDate[1];
+        }
+      }
+
+      // ─── 11. Rates & Percentages ───
+      else if (normTitle.includes('interestrate') || normTitle.includes('roi') || normTitle.includes('gstrate') || normTitle.includes('taxrate')) {
+        extractedValue = this.extractFromLineContext(lines, [normTitle, 'interest', 'rate'], [], false, false);
+      }
+
+      // ─── 12. Financial Amounts ───
+      else if (isNumericField) {
+        extractedValue = this.extractFromLineContext(lines, [normTitle], [], false, true);
+        if (!extractedValue) {
+          for (const line of lines) {
+            const lineNorm = line.toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (lineNorm.includes(normTitle)) {
+              const m = line.match(/(?:Rs\.?|INR|₹)?\s*([\d,]+(?:\.\d{2})?)\s*(?:\/\-|Only)?/i);
+              if (m && m[1].replace(/,/g, '').length >= 1) {
+                extractedValue = m[1].replace(/,/g, '');
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // ─── 13. Universal Fallback ───
+      if (!extractedValue) {
+        const isNameField = normTitle.includes('name') && !normTitle.includes('document') && !normTitle.includes('company') && !normTitle.includes('firm') && !normTitle.includes('bank');
+        extractedValue = this.extractFromLineContext(
+          lines,
+          [normTitle, title.toLowerCase()],
+          isNameField ? ['father', 'mother', 'spouse', 'bank', 'company', 'address', 'branch'] : [],
+          isNameField,
+          isNumericField,
+        );
+
+        if (!extractedValue && isNameField) {
+          extractedValue = this.extractDynamicName(rawText);
+        }
+      }
+
+      // Final sanitization
+      if (extractedValue) {
+        const cleaned = this.cleanAndValidate(extractedValue, normTitle.includes('name'), isNumericField);
+        if (cleaned) fields[title] = cleaned;
+      }
+    }
+
+    return fields;
+  }
+
+  // ─── Schema Normalization Helper ───
+  private flattenSchema(customSchema: any): Array<{ title: string; type?: string }> {
+    const list: Array<{ title: string; type?: string }> = [];
+
+    const addItem = (item: any) => {
+      if (typeof item === 'string' && item.trim().length > 0) {
+        list.push({ title: item.trim() });
+      } else if (item && typeof item === 'object') {
+        const title = item.title || item.name || item.key || item.field || item.fieldName || item.label;
+        if (title && typeof title === 'string') {
+          list.push({ title: title.trim(), type: item.type });
+        }
+      }
+    };
+
+    if (Array.isArray(customSchema)) {
+      customSchema.forEach(addItem);
+    } else {
+      let schemaObj = customSchema;
+      const keys = Object.keys(customSchema);
+
+      if (keys.length === 1 && customSchema[keys[0]] && typeof customSchema[keys[0]] === 'object' && !customSchema.fields) {
+        schemaObj = customSchema[keys[0]];
+      }
+
+      if (Array.isArray(schemaObj.fields)) schemaObj.fields.forEach(addItem);
+      if (Array.isArray(schemaObj.sections)) {
+        schemaObj.sections.forEach((sec: any) => {
+          if (Array.isArray(sec.fields)) sec.fields.forEach(addItem);
+        });
+      }
+
+      if (list.length === 0) {
+        for (const [k, v] of Object.entries(schemaObj)) {
+          if (['document_id', 'document_name', 'category'].includes(k)) continue;
+          addItem(typeof v === 'object' ? { title: k, ...(v as any) } : { title: k });
+        }
+      }
+    }
+
+    return list;
+  }
+
+  // ─── Extraction Helper ───
+  private extractFromLineContext(
+    lines: string[],
+    targetTokens: string[],
+    excludeTokens: string[] = [],
+    isNameField = false,
+    isNumericField = false,
+  ): string | null {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const lineNorm = line.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+      if (excludeTokens.some((ex) => lineNorm.includes(ex))) continue;
+
+      for (const token of targetTokens) {
+        if (!lineNorm.includes(token)) continue;
+
+        if (isNumericField) {
+          const nums = line.match(/\b\d+(?:[.,]\d+)*\b/g);
+          if (nums && nums.length > 0) {
+            const clean = nums.map((n) => n.replace(/[,\s]/g, '')).filter(Boolean);
+            if (clean.length > 0) {
+              let chosen = clean[0];
+              if (clean.length > 1 && /^\s*\d+[.)]\s+/.test(line) && /^\d{1,2}$/.test(clean[0])) {
+                chosen = clean[1];
+              }
+              return chosen;
+            }
+          }
+        }
+
+        const sepMatch = line.match(/[:\-=]\s*(.+)$/);
+        if (sepMatch && sepMatch[1]) {
+          const val = this.cleanAndValidate(sepMatch[1].trim(), isNameField, isNumericField);
+          if (val) return val;
+        }
+
+        if (i + 1 < lines.length && !lines[i + 1].includes(':')) {
+          if (isNumericField) {
+            const nextNums = lines[i + 1].match(/\b\d+(?:[.,]\d+)*\b/g);
+            if (nextNums && nextNums.length > 0) return nextNums[0].replace(/[,\s]/g, '');
+          }
+          const nextVal = this.cleanAndValidate(lines[i + 1], isNameField, isNumericField);
+          if (nextVal && !excludeTokens.some((ex) => lines[i + 1].toLowerCase().includes(ex))) {
+            return nextVal;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  private extractDynamicName(rawText: string): string | null {
+    const lines = rawText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+    for (const line of lines) {
+      const m = line.match(/(?:M\/s\.?\s*|Messrs\s+)([A-Za-z0-9\s.,&()'-]{3,45})/i);
+      if (m && !this.isBlacklistedName(m[1])) return m[1].trim();
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      if (/(?:Name|Legal\s*Name|Firm\s*Name|Enterprise|Borrower|Consumer|नाम)\b/i.test(lines[i])) {
+        const m = lines[i].match(/(?:Name|नाम|Enterprise|Firm|Consumer)\s*[:/]?\s*([A-Za-z\s.']{3,40})/i);
+        if (m && !this.isBlacklistedName(m[1])) return m[1].trim();
+        if (i + 1 < lines.length && /^[A-Za-z\s.']{3,40}$/.test(lines[i + 1]) && !this.isBlacklistedName(lines[i + 1])) {
+          return lines[i + 1].trim();
+        }
+      }
+    }
+
+    for (const line of lines) {
+      if (/^[A-Z][a-zA-Z.']{1,20}(?:\s+[A-Z][a-zA-Z.']{1,20}){1,3}$/.test(line) && !this.isBlacklistedName(line)) {
+        return line.trim();
+      }
+    }
+
+    return null;
+  }
+
+  private cleanAndValidate(val: string, isNameField = false, isNumericField = false): string | null {
+    if (!val || typeof val !== 'string') return null;
+
+    const clean = val.replace(/^[\s(){}::\/\-\.'"]+|[\s(){}::\/\-\.'"]+$/g, '').replace(/[()[\]{}]/g, '').trim();
+
+    if (isNumericField) {
+      if (!clean || /^[\-–—]+$/.test(clean) || /^nil$/i.test(clean)) return '0.00';
+      const nums = clean.match(/\b\d+(?:[.,]\d+)*\b/g);
+      if (!nums) return '0.00';
+      return nums[0].replace(/,/g, '') || '0.00';
+    }
+
+    if (clean.length < 2 || !/[a-zA-Z0-9]/.test(clean)) return null;
+
+    if (/^(?:नाम|Name|Full\s*Name|Father|Date|DOB|Gender|Sex|Address|PAN)$/i.test(clean)) return null;
+
+    if (isNameField && this.isBlacklistedName(clean)) return null;
+
+    return clean;
+  }
+
+  private isBlacklistedName(str: string): boolean {
+    if (!str || str.trim().length < 3) return true;
+
+    const BLACKLISTED = new Set([
+      'GOVERNMENT OF INDIA',
+      'INCOME TAX DEPARTMENT',
+      'GOODS AND SERVICES TAX',
+      'REGISTRATION CERTIFICATE',
+      'PERMANENT ACCOUNT NUMBER CARD',
+      'UNIQUE IDENTIFICATION AUTHORITY OF INDIA',
+      'UDYAM REGISTRATION CERTIFICATE',
+      'AADHAAR',
+      'AADHAAR CARD',
+      'ELECTRICITY BILL',
+      'BALANCE SHEET REPORT',
+      'PROJECT REPORT',
+      'LOAN SANCTION LETTER',
+      'BIRTH CERTIFICATE',
+    ]);
+
+    const HEADER_WORDS = new Set([
+      'INCOME', 'DEPARTMENT', 'GOVT', 'GOVERNMENT', 'INDIA', 'PERMANENT', 'ACCOUNT',
+      'SIGNATURE', 'AUTHORITY', 'IDENTIFICATION', 'ELECTRICITY', 'SANCTION',
+    ]);
+
+    const upper = str.toUpperCase().trim();
+    if (BLACKLISTED.has(upper)) return true;
+
+    const words = upper.split(/\s+/).filter(Boolean);
+    let blacklistCount = 0;
+    for (const w of words) {
+      if (HEADER_WORDS.has(w)) blacklistCount++;
+    }
+    return blacklistCount / words.length > 0.5;
+  }
+
+  private cleanAddress(raw: string): string | null {
+    if (!raw) return null;
+    const clean = raw.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').replace(/^[:,\-\s]+/, '').trim();
+    return clean.length >= 5 ? clean : null;
+  }
+
+  private formatAadhaar(v: string): string {
+    const digits = v.replace(/\D/g, '');
+    return digits.length === 12
+      ? `${digits.slice(0, 4)} ${digits.slice(4, 8)} ${digits.slice(8)}`
+      : digits;
+  }
+
+  private isFinancialOrNumericTitle(title: string, fieldType?: string): boolean {
+    if (fieldType === 'date') return false;
+    if (fieldType === 'numeric') return true;
+    return /\b(?:amount|fee|price|cost|balance|total|capital|loan|turnover|salary|premium|rent|deposit|tax|gross|net|land|building|plant|machinery|equipment|fitting|asset|liability|stock|cash|debtor|creditor|gold|share|investment|duty|overdraft|margin|advance|value)\b/i.test(title);
+  }
+}
+```
+
+### 1.10 Package Dependencies
+
+```json
+{
+  "dependencies": {
+    "axios": "^1.19.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "file-type": "^19.6.0",
+    "mupdf": "^1.28.0",
+    "onnxruntime-node": "1.20.1",
+    "ppu-paddle-ocr": "^1.1.0",
+    "sharp": "^0.33.5"
+  },
+  "overrides": {
+    "onnxruntime-node": "1.20.1"
+  }
+}
+```
+
+---
+
+## Part 2: React Frontend
+
+### 2.1 API Service — `services/api.ts`
+
+```typescript
+export interface OcrExtractRequest {
+  fileUrl: string; // HTTP/HTTPS URL
+  documentType: string;
+  customSchema?: any;
+}
+
+export interface OcrExtractResponse {
+  success: boolean;
+  text: string;
+  fields: Record<string, string>;
+  pages: number;
+  processingTimeMs: number;
+  documentType: string;
+  error?: string;
+}
+
+const API_BASE = '/api';
+
+export const extractOcrData = async (
+  payload: OcrExtractRequest,
+): Promise<OcrExtractResponse> => {
+  const response = await fetch(`${API_BASE}/ocr/extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(
+      (errorData as { error?: string }).error ||
+        `OCR extraction failed: ${response.statusText}`,
+    );
+  }
+
+  return response.json();
+};
+```
+
+### 2.2 React Verification UI — `components/CustomDocumentVerificationUI.tsx`
+
+```tsx
+import React, { useState, useEffect } from 'react';
+import { extractOcrData } from '../services/api';
+
+interface SchemaFieldItem {
+  id?: number;
+  title: string;
+  type?: string;
+  required?: boolean;
+  placeholder?: string;
+}
+
+const SAMPLE_PAN_SCHEMA = {
+  PanCard: {
+    document_name: 'PAN Card',
+    fields: [
+      { title: 'PAN NUMBER', type: 'alphanumeric', required: true },
+      { title: 'NAME', type: 'free_text', required: true },
+      { title: 'DATE OF BIRTH', type: 'date', required: true },
+    ],
+  },
+};
+
+export function CustomDocumentVerificationUI() {
+  // Document HTTP URL (e.g. S3 / CDN URL)
+  const [documentHttpUrl, setDocumentHttpUrl] = useState<string>(
+    'https://example-storage.com/documents/sample_pan.png',
+  );
+
+  // Schema state
+  const [jsonSchemaText, setJsonSchemaText] = useState(
+    JSON.stringify(SAMPLE_PAN_SCHEMA, null, 2),
+  );
+  const [parsedSchema, setParsedSchema] = useState<any>(SAMPLE_PAN_SCHEMA);
+  const [jsonError, setJsonError] = useState<string | null>(null);
+
+  // Form values state
+  const [formData, setFormData] = useState<Record<string, string>>({});
+
+  // OCR state
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  useEffect(() => {
+    try {
+      setParsedSchema(JSON.parse(jsonSchemaText));
+      setJsonError(null);
+    } catch (err) {
+      setJsonError(err instanceof Error ? err.message : 'Invalid JSON format');
+    }
+  }, [jsonSchemaText]);
+
+  const getFieldsList = (): SchemaFieldItem[] => {
+    if (!parsedSchema) return [];
+    const list: SchemaFieldItem[] = [];
+
+    const processItem = (item: any) => {
+      if (typeof item === 'string' && item.trim()) {
+        list.push({ title: item.trim().toUpperCase(), placeholder: `ENTER ${item.trim().toUpperCase()}` });
+      } else if (item && typeof item === 'object') {
+        const title = item.title || item.name || item.key || item.field || item.fieldName || item.label;
+        if (title && typeof title === 'string') {
+          list.push({
+            id: item.id,
+            title: title.trim().toUpperCase(),
+            type: item.type || 'alphanumeric',
+            required: item.required !== undefined ? Boolean(item.required) : true,
+            placeholder: item.placeholder || `ENTER ${title.trim().toUpperCase()}`,
+          });
+        }
+      }
+    };
+
+    if (Array.isArray(parsedSchema)) {
+      parsedSchema.forEach(processItem);
+      return list;
+    }
+
+    if (typeof parsedSchema === 'object' && parsedSchema !== null) {
+      let target = parsedSchema;
+      const keys = Object.keys(parsedSchema);
+      if (keys.length === 1 && parsedSchema[keys[0]] && typeof parsedSchema[keys[0]] === 'object' && !parsedSchema.fields) {
+        target = parsedSchema[keys[0]];
+      }
+      if (Array.isArray(target.fields)) target.fields.forEach(processItem);
+      if (Array.isArray(target.sections)) {
+        target.sections.forEach((sec: any) => {
+          if (Array.isArray(sec.fields)) sec.fields.forEach(processItem);
+        });
+      }
+      if (list.length === 0) {
+        for (const [k, v] of Object.entries(target)) {
+          if (['document_id', 'document_name', 'category'].includes(k)) continue;
+          processItem(typeof v === 'object' ? { title: k, ...(v as any) } : { title: k });
+        }
+      }
+    }
+    return list;
+  };
+
+  const fieldsList = getFieldsList();
+
+  const handleExtractOcr = async () => {
+    if (jsonError) {
+      alert('Please fix JSON Schema syntax error before extracting');
+      return;
+    }
+    if (!documentHttpUrl.startsWith('http://') && !documentHttpUrl.startsWith('https://')) {
+      alert('Please enter a valid HTTP/HTTPS URL for the document');
+      return;
+    }
+
+    setIsExtracting(true);
+    setToast({ message: '⏳ Downloading document & extracting fields via OCR...', type: 'info' });
+
+    try {
+      const result = await extractOcrData({
+        fileUrl: documentHttpUrl,
+        documentType: 'CUSTOM',
+        customSchema: parsedSchema,
+      });
+
+      if (result.success && result.fields) {
+        const updated = { ...formData };
+        let count = 0;
+
+        for (const [extractedKey, val] of Object.entries(result.fields)) {
+          if (!val) continue;
+          const normKey = extractedKey.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+          let match = fieldsList.find(
+            (f) => f.title.toLowerCase().replace(/[^a-z0-9]/g, '') === normKey,
+          );
+
+          if (!match) {
+            match = fieldsList.find((f) => {
+              const normTitle = f.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+              if (
+                (normKey === 'name' || normKey === 'fullname') &&
+                (normTitle.includes('father') || normTitle.includes('mother') || normTitle.includes('spouse'))
+              ) {
+                return false;
+              }
+              return normTitle.includes(normKey) || normKey.includes(normTitle);
+            });
+          }
+
+          if (match) {
+            if (match.type === 'date' && /^\d{2}[\/\-]\d{2}[\/\-]\d{4}$/.test(val)) {
+              const parts = val.split(/[\/\-]/);
+              updated[match.title] = `${parts[2]}-${parts[1]}-${parts[0]}`;
+            } else {
+              updated[match.title] = val;
+            }
+            count++;
+          }
+        }
+
+        setFormData(updated);
+        setToast({
+          message: `✅ Extracted ${count} fields in ${result.processingTimeMs}ms (${result.pages} page${result.pages > 1 ? 's' : ''})`,
+          type: 'success',
+        });
+      } else {
+        setToast({ message: `❌ Extraction failed: ${result.error || 'Unknown error'}`, type: 'error' });
+      }
+    } catch (err) {
+      setToast({ message: `❌ Error: ${err instanceof Error ? err.message : 'Request failed'}`, type: 'error' });
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
+  return (
+    <div style={{ padding: '1.5rem', maxWidth: '1200px', margin: '0 auto' }}>
+      {toast && (
+        <div style={{
+          position: 'fixed', bottom: '2rem', right: '2rem', zIndex: 9999,
+          padding: '1rem 1.5rem', borderRadius: '10px', color: '#fff', fontWeight: 600,
+          background: toast.type === 'success' ? '#10b981' : toast.type === 'error' ? '#ef4444' : '#3b82f6',
+        }}>
+          {toast.message}
+        </div>
+      )}
+
+      <h2>🧩 Custom Schema OCR Extractor (HTTP URL)</h2>
+
+      {/* Document HTTP URL Input */}
+      <div style={{ marginBottom: '1rem', background: '#f8fafc', padding: '1rem', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+        <label style={{ display: 'block', fontWeight: 700, marginBottom: '0.5rem' }}>
+          🌐 Document HTTP/HTTPS URL (S3 / CDN / Cloud Storage):
+        </label>
+        <input
+          type="url"
+          value={documentHttpUrl}
+          onChange={(e) => setDocumentHttpUrl(e.target.value)}
+          placeholder="https://your-bucket.s3.amazonaws.com/documents/sample.pdf"
+          style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+        />
+      </div>
+
+      {/* Schema JSON Editor */}
+      <div style={{ marginBottom: '1rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+          <span style={{ fontWeight: 600 }}>Custom JSON Schema ({fieldsList.length} fields):</span>
+          {jsonError && <span style={{ color: '#ef4444' }}>❌ {jsonError}</span>}
+        </div>
+        <textarea
+          value={jsonSchemaText}
+          onChange={(e) => setJsonSchemaText(e.target.value)}
+          rows={8}
+          style={{ width: '100%', fontFamily: 'monospace', fontSize: '0.85rem', padding: '0.75rem', borderRadius: '8px' }}
+        />
+      </div>
+
+      <button
+        onClick={handleExtractOcr}
+        disabled={isExtracting}
+        style={{
+          padding: '0.75rem 2rem', fontWeight: 700, color: '#fff',
+          background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', border: 'none', borderRadius: '8px',
+          cursor: isExtracting ? 'wait' : 'pointer', marginBottom: '1.5rem',
+        }}
+      >
+        {isExtracting ? '⏳ Extracting Fields...' : '🔍 EXTRACT FROM HTTP URL'}
+      </button>
+
+      {/* Dynamic Form Auto-Filled by OCR */}
+      <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '1.25rem' }}>
+        <h3>📝 Auto-Filled Form Fields</h3>
+        <form onSubmit={(e) => { e.preventDefault(); alert('Form submitted!'); }}>
+          {fieldsList.map((field) => (
+            <div key={field.title} style={{ marginBottom: '0.85rem' }}>
+              <label style={{ fontWeight: 600, fontSize: '0.85rem', display: 'block', marginBottom: '0.25rem' }}>
+                {field.title} {field.required && <span style={{ color: '#ef4444' }}>*</span>}
+              </label>
+              <input
+                type={field.type === 'date' ? 'date' : 'text'}
+                value={formData[field.title] || ''}
+                onChange={(e) => setFormData((prev) => ({ ...prev, [field.title]: e.target.value }))}
+                placeholder={field.placeholder}
+                required={field.required}
+                style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', border: '1px solid #cbd5e1' }}
+              />
+            </div>
+          ))}
+          <button type="submit" style={{ padding: '0.75rem 1.5rem', background: '#10b981', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 700, marginTop: '0.5rem' }}>
+            Submit Data
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+```
+
+---
+
+## Part 3: Test Request
+
+```bash
+curl -X POST http://localhost:3000/api/ocr/extract \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fileUrl": "https://raw.githubusercontent.com/user/repo/main/samples/pan_card.png",
+    "documentType": "CUSTOM",
+    "customSchema": {
+      "PanCard": {
+        "document_name": "PAN Card",
+        "fields": [
+          { "title": "PAN NUMBER", "type": "alphanumeric" },
+          { "title": "NAME", "type": "free_text" },
+          { "title": "DATE OF BIRTH", "type": "date" }
+        ]
+      }
+    }
+  }'
+```
