@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: bill-ocr-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: yarn install --production=false && yarn build
+    startCommand: yarn start
+    envVars:
+      - key: NODE_VERSION
+        value: 20.18.0
+      - key: NODE_ENV
+        value: production
+      - key: CLIENT_ORIGIN
+        value: https://billocr.netlify.app
+      - key: GEMINI_API_KEY
+        sync: false

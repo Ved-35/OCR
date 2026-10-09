@@ -1,4 +1,4 @@
-import express, { Express } from 'express';
+import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import apiRoutes from './routes/api.routes.js';
 import { requestLogger } from './middleware/logger.js';
@@ -39,7 +39,7 @@ export const createApp = (): Express => {
   app.use('/api', apiRoutes);
 
   // 404 Handler
-  app.use((_req, res) => {
+  app.use((_req: Request, res: Response) => {
     res.status(404).json({
       status: 'error',
       statusCode: 404,
