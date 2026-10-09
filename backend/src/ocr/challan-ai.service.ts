@@ -64,7 +64,7 @@ ${fieldsList}
 Also extract ALL individual taka (piece) entries from the document. Each taka entry should have:
 - takaNo: sequential number (1, 2, 3...)
 - meters: the meter measurement as a string (e.g., "121.50")
-- weight: the weight measurement as a string if available (e.g., "15.2"), otherwise omit
+NOTE: Do NOT extract weight. Only extract meters for each taka.
 
 ## Important Rules:
 1. Read the document VERY carefully — handwritten text may be difficult to read.
@@ -73,7 +73,7 @@ Also extract ALL individual taka (piece) entries from the document. Each taka en
 4. SUPPLIER is typically the sender/consignor/from party.
 5. RECIPIENT is typically the receiver/consignee/to party/buyer.
 6. For meter values, be precise — these are fabric lengths.
-7. For takas, read the tabular data carefully — each row is one taka with its meter and optional weight.
+7. For takas, extract each individual taka meter entry from the table. Do not include weight.
 8. If a field is not found in the document, use an empty string "".
 9. QUALITY refers to the fabric quality/type name.
 10. BROKER NAME is the intermediary/agent if mentioned.
@@ -98,7 +98,7 @@ Return ONLY valid JSON in this exact structure (no markdown, no code fences, no 
     "TAKA DETAILS": "..."
   },
   "takas": [
-    { "takaNo": 1, "meters": "121.50", "weight": "15.2" },
+    { "takaNo": 1, "meters": "121.50" },
     { "takaNo": 2, "meters": "118.00" }
   ]
 }`;
@@ -339,9 +339,7 @@ export async function extractChallanWithAi(
       fields['TOTAL PIECES'] = takas.length.toString();
       const sumM = takas.reduce((a, t) => a + (parseFloat(t.meters) || 0), 0);
       if (sumM > 0) fields['TOTAL METER'] = sumM.toFixed(2);
-      const sumWg = takas.reduce((a, t) => a + (parseFloat(t.weight || '0') || 0), 0);
-      const wDisplay = sumWg > 0 ? `, ${(sumWg / 1000).toFixed(2)} Kg` : '';
-      fields['TAKA DETAILS'] = `${takas.length} Takas (${(sumM || 0).toFixed(2)} Mtr${wDisplay})`;
+      fields['TAKA DETAILS'] = `${takas.length} Takas (${(sumM || 0).toFixed(2)} Mtr)`;
     }
 
     const processingTimeMs = Date.now() - startTime;

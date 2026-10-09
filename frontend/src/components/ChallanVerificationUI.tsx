@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { extractChallanOcrData, extractChallanAiOcrData } from '../services/api';
 
 /** Default 13 Challan Bill Schema including Supplier & Recipient Addresses */
@@ -295,25 +295,13 @@ export const ChallanVerificationUI: React.FC = () => {
   const [takasList, setTakasList] = useState<TakaItem[]>([]);
   const [takaSearch, setTakaSearch] = useState<string>('');
 
-  // Calculate live sum of meters and weight from takasList
+  // Calculate live sum of meters from takasList
   const takaTotalMeters = takasList.reduce((sum, t) => sum + (parseFloat(t.meters) || 0), 0);
-  const takaTotalWeight = takasList.reduce((sum, t) => sum + (parseFloat(t.weight || '0') || 0), 0);
-  const formatWeightDisplay = (w: number) => {
-    if (w >= 500) {
-      const inKg = w / 1000;
-      return inKg % 1 === 0 ? inKg.toString() : inKg.toFixed(2);
-    }
-    return (w % 1 === 0 ? w.toString() : w.toFixed(2));
-  };
 
-  // Helper to format TAKA DETAILS summary string
+  // Helper to format TAKA DETAILS summary string (meters only)
   const formatTakaDetailsString = (takas: TakaItem[]) => {
     if (takas.length === 0) return '';
     const mSum = takas.reduce((acc, t) => acc + (parseFloat(t.meters) || 0), 0);
-    const wSum = takas.reduce((acc, t) => acc + (parseFloat(t.weight || '0') || 0), 0);
-    if (wSum > 0) {
-      return `${takas.length} Takas (${mSum.toFixed(2)} Mtr, ${formatWeightDisplay(wSum)} Kg)`;
-    }
     return `${takas.length} Takas (${mSum.toFixed(2)} Mtr)`;
   };
 
@@ -321,18 +309,6 @@ export const ChallanVerificationUI: React.FC = () => {
   const handleUpdateTakaMeters = (takaNo: number, meters: string) => {
     setTakasList((prev) => {
       const next = prev.map((t) => (t.takaNo === takaNo ? { ...t, meters } : t));
-      setFormData((f) => ({
-        ...f,
-        'TAKA DETAILS': formatTakaDetailsString(next),
-      }));
-      return next;
-    });
-  };
-
-  // Update specific taka weight dynamically
-  const handleUpdateTakaWeight = (takaNo: number, weight: string) => {
-    setTakasList((prev) => {
-      const next = prev.map((t) => (t.takaNo === takaNo ? { ...t, weight } : t));
       setFormData((f) => ({
         ...f,
         'TAKA DETAILS': formatTakaDetailsString(next),
@@ -383,93 +359,16 @@ export const ChallanVerificationUI: React.FC = () => {
     });
   };
 
-  // Copy all takas to clipboard with separated Meter and Weight columns
+  // Copy all takas to clipboard (Meters only)
   const handleCopyTakasList = () => {
     if (takasList.length === 0) return;
-    const header = `--- TAKA DETAILS (${takasList.length} Takas | Total Mtr: ${takaTotalMeters.toFixed(2)}m${takaTotalWeight > 0 ? ` | Total Wt: ${formatWeightDisplay(takaTotalWeight)}kg` : ''}) ---\n`;
+    const header = `--- TAKA DETAILS (${takasList.length} Takas | Total Mtr: ${takaTotalMeters.toFixed(2)}m) ---\n`;
     const rows = takasList
-      .map((t) => `Taka #${t.takaNo.toString().padEnd(3)} | Meters: ${(t.meters || '0.00').padStart(7)} m | Weight: ${(t.weight || '—').padStart(7)}${t.weight ? ' kg' : ''}`)
+      .map((t) => `Taka #${t.takaNo.toString().padEnd(3)} | Meters: ${(t.meters || '0.00').padStart(7)} m`)
       .join('\n');
     navigator.clipboard.writeText(header + rows);
-    setOcrToast({ message: '📋 Copied all Taka meters & weights to clipboard!', type: 'success' });
+    setOcrToast({ message: '📋 Copied all Taka meters to clipboard!', type: 'success' });
   };
-
-  // Toggle pairing/unpairing for challans with alternating Meter & Weight columns
-  const handleToggleMeterWeightSplit = () => {
-    if (takasList.length === 72 && (!takasList[0].weight || parseFloat(takasList[0].weight) === 0)) {
-      // Pair 72 single-meter items into 36 items with distinct Meters & Weights
-      const paired: TakaItem[] = [];
-      let takaIdx = 1;
-      // Col 1 (Meters 0-11) + Col 2 (Weight 12-23)
-      for (let i = 0; i < 12; i++) {
-        paired.push({
-          takaNo: takaIdx++,
-          meters: takasList[i]?.meters || '0.00',
-          weight: takasList[i + 12]?.meters || '0.00',
-        });
-      }
-      // Col 3 (Meters 24-35) + Col 4 (Weight 36-47)
-      for (let i = 24; i < 36; i++) {
-        paired.push({
-          takaNo: takaIdx++,
-          meters: takasList[i]?.meters || '0.00',
-          weight: takasList[i + 12]?.meters || '0.00',
-        });
-      }
-      // Col 5 (Meters 48-59) + Col 6 (Weight 60-71)
-      for (let i = 48; i < 60; i++) {
-        paired.push({
-          takaNo: takaIdx++,
-          meters: takasList[i]?.meters || '0.00',
-          weight: takasList[i + 12]?.meters || '0.00',
-        });
-      }
-      setTakasList(paired);
-      setFormData((f) => ({
-        ...f,
-        'TAKA DETAILS': formatTakaDetailsString(paired),
-      }));
-      setOcrToast({
-        message: '🔀 Paired columns into 36 Takas with distinct Meters & Weights!',
-        type: 'success',
-      });
-    } else if (takasList.length === 36 && takasList[0].weight) {
-      // Expand back to 72 individual column measurements
-      const expanded: TakaItem[] = [];
-      let takaIdx = 1;
-      // Col 1 & 2
-      for (let i = 0; i < 12; i++) expanded.push({ takaNo: takaIdx++, meters: takasList[i].meters, weight: '' });
-      for (let i = 0; i < 12; i++) expanded.push({ takaNo: takaIdx++, meters: takasList[i].weight || '0.00', weight: '' });
-      // Col 3 & 4
-      for (let i = 12; i < 24; i++) expanded.push({ takaNo: takaIdx++, meters: takasList[i].meters, weight: '' });
-      for (let i = 12; i < 24; i++) expanded.push({ takaNo: takaIdx++, meters: takasList[i].weight || '0.00', weight: '' });
-      // Col 5 & 6
-      for (let i = 24; i < 36; i++) expanded.push({ takaNo: takaIdx++, meters: takasList[i].meters, weight: '' });
-      for (let i = 24; i < 36; i++) expanded.push({ takaNo: takaIdx++, meters: takasList[i].weight || '0.00', weight: '' });
-
-      setTakasList(expanded);
-      setFormData((f) => ({
-        ...f,
-        'TAKA DETAILS': formatTakaDetailsString(expanded),
-      }));
-      setOcrToast({
-        message: '🔀 Expanded into 72 individual column measurements!',
-        type: 'info',
-      });
-    }
-  };
-
-  const hasAutoPaired = useRef<boolean>(false);
-
-  // Auto-pair 72 items with empty weights into 36 items with distinct Meters & Weights on initial mount/extraction
-  useEffect(() => {
-    if (!hasAutoPaired.current && takasList.length === 72 && (!takasList[0]?.weight || parseFloat(takasList[0]?.weight || '0') === 0)) {
-      hasAutoPaired.current = true;
-      handleToggleMeterWeightSplit();
-    }
-  }, [takasList]);
-
-
 
   // Sync schema changes to JSON string
   const updateSchemaState = (newFields: SchemaFieldItem[]) => {
@@ -825,10 +724,7 @@ export const ChallanVerificationUI: React.FC = () => {
 
         if (result.takas && Array.isArray(result.takas) && result.takas.length > 0) {
           const sumM = result.takas.reduce((acc, t) => acc + (parseFloat(t.meters) || 0), 0);
-          const sumW = result.takas.reduce((acc, t) => acc + (parseFloat(t.weight || '0') || 0), 0);
-          updated['TAKA DETAILS'] = sumW > 0
-            ? `${result.takas.length} Takas (${sumM.toFixed(2)} Mtr, ${formatWeightDisplay(sumW)} Kg)`
-            : `${result.takas.length} Takas (${sumM.toFixed(2)} Mtr)`;
+          updated['TAKA DETAILS'] = `${result.takas.length} Takas (${sumM.toFixed(2)} Mtr)`;
         }
 
         setFormData(updated);
@@ -933,10 +829,7 @@ export const ChallanVerificationUI: React.FC = () => {
 
         if (result.takas && Array.isArray(result.takas) && result.takas.length > 0) {
           const sumM = result.takas.reduce((acc, t) => acc + (parseFloat(t.meters) || 0), 0);
-          const sumW = result.takas.reduce((acc, t) => acc + (parseFloat(t.weight || '0') || 0), 0);
-          updated['TAKA DETAILS'] = sumW > 0
-            ? `${result.takas.length} Takas (${sumM.toFixed(2)} Mtr, ${formatWeightDisplay(sumW)} Kg)`
-            : `${result.takas.length} Takas (${sumM.toFixed(2)} Mtr)`;
+          updated['TAKA DETAILS'] = `${result.takas.length} Takas (${sumM.toFixed(2)} Mtr)`;
         }
 
         setFormData(updated);
@@ -1461,7 +1354,7 @@ export const ChallanVerificationUI: React.FC = () => {
                   gap: '6px',
                 }}
               >
-                🧵 Taka Breakdown ({takasList.length > 0 ? `${takasList.length} Takas • ${takaTotalMeters.toFixed(2)}m${takaTotalWeight > 0 ? ` • ${formatWeightDisplay(takaTotalWeight)}kg` : ''}` : '0 Takas'})
+                🧵 Taka Breakdown ({takasList.length > 0 ? `${takasList.length} Takas • ${takaTotalMeters.toFixed(2)}m` : '0 Takas'})
               </button>
             </div>
 
@@ -1697,9 +1590,8 @@ export const ChallanVerificationUI: React.FC = () => {
                               <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', fontSize: '0.72rem', color: '#94a3b8', flexWrap: 'wrap' }}>
                                 <span>📦 <strong>{takasList.length}</strong> Pieces</span>
                                 <span>📏 Total: <strong style={{ color: '#34d399' }}>{takaTotalMeters.toFixed(2)} Mtr</strong></span>
-                                {takaTotalWeight > 0 && <span>⚖️ Wt: <strong style={{ color: '#f59e0b' }}>{formatWeightDisplay(takaTotalWeight)} Kg</strong></span>}
                                 <span style={{ color: '#38bdf8' }}>
-                                  Preview: {takasList.slice(0, 4).map((t) => `#${t.takaNo}:${t.meters}m${t.weight ? `/${t.weight}kg` : ''}`).join(' | ')}...
+                                  Preview: {takasList.slice(0, 5).map((t) => `#${t.takaNo}:${t.meters}m`).join(' | ')}...
                                 </span>
                               </div>
                             )}
@@ -1769,8 +1661,8 @@ export const ChallanVerificationUI: React.FC = () => {
                   <span style={{ fontSize: '0.8rem', color: '#34d399', fontWeight: 700 }}>
                     📏 {takaTotalMeters.toFixed(2)} Mtr
                   </span>
-                  <span style={{ fontSize: '0.8rem', color: '#f59e0b', fontWeight: 700 }}>
-                    ⚖️ {takaTotalWeight > 0 ? `${formatWeightDisplay(takaTotalWeight)} Kg` : '0 Kg'}
+                  <span style={{ fontSize: '0.8rem', color: '#34d399', fontWeight: 700 }}>
+                    📏 {takaTotalMeters.toFixed(2)} Mtr
                   </span>
                   {formData['TOTAL METER'] && (
                     <span
@@ -1845,24 +1737,6 @@ export const ChallanVerificationUI: React.FC = () => {
                   >
                     📋 Copy
                   </button>
-                  {(takasList.length === 72 || takasList.length === 36) && (
-                    <button
-                      onClick={handleToggleMeterWeightSplit}
-                      title={takasList.length === 72 ? 'Pair 6 columns into 36 Takas (Meter + Weight)' : 'Expand to 72 individual measurements'}
-                      style={{
-                        padding: '0.28rem 0.55rem',
-                        fontSize: '0.74rem',
-                        background: 'rgba(168, 85, 247, 0.15)',
-                        border: '1px solid #a855f7',
-                        color: '#c084fc',
-                        borderRadius: '4px',
-                        cursor: 'pointer',
-                        fontWeight: 700,
-                      }}
-                    >
-                      {takasList.length === 72 ? '🔀 Pair M&W (36)' : '🔀 All 72 Mtr'}
-                    </button>
-                  )}
                 </div>
               </div>
 
@@ -1870,7 +1744,7 @@ export const ChallanVerificationUI: React.FC = () => {
               <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                 <input
                   type="text"
-                  placeholder="🔍 Search Taka #, Meters or Weight..."
+                  placeholder="🔍 Search Taka # or Meters..."
                   value={takaSearch}
                   onChange={(e) => setTakaSearch(e.target.value)}
                   style={{
@@ -1912,7 +1786,7 @@ export const ChallanVerificationUI: React.FC = () => {
                       No Taka Details Extracted Yet
                     </div>
                     <div style={{ fontSize: '0.8rem', marginBottom: '1rem' }}>
-                      Click <strong>&quot;🔍 EXTRACT OCR&quot;</strong> above to dynamically extract all piece meters & weights from this bill.
+                      Click <strong>&quot;🔍 EXTRACT OCR&quot;</strong> above to dynamically extract all piece meters from this bill.
                     </div>
                     <button
                       onClick={handleFetchChallanOcrData}
@@ -1932,16 +1806,12 @@ export const ChallanVerificationUI: React.FC = () => {
                     </button>
                   </div>
                 ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '0.55rem' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: '0.55rem' }}>
                     {takasList
                       .filter((taka) => {
                         if (!takaSearch.trim()) return true;
                         const q = takaSearch.trim().toLowerCase().replace('#', '');
-                        return (
-                          taka.takaNo.toString().includes(q) ||
-                          taka.meters.toLowerCase().includes(q) ||
-                          (taka.weight && taka.weight.toLowerCase().includes(q))
-                        );
+                        return taka.takaNo.toString().includes(q) || taka.meters.toLowerCase().includes(q);
                       })
                       .map((taka) => (
                         <div
@@ -1990,64 +1860,31 @@ export const ChallanVerificationUI: React.FC = () => {
                             </button>
                           </div>
 
-                          {/* Separated Meter & Weight inputs */}
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.4rem' }}>
-                            {/* 📏 Meter */}
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
-                              <span style={{ fontSize: '0.62rem', color: '#34d399', fontWeight: 700 }}>📏 Meter</span>
-                              <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                                <input
-                                  type="text"
-                                  value={taka.meters}
-                                  onChange={(e) => handleUpdateTakaMeters(taka.takaNo, e.target.value)}
-                                  placeholder="0.00"
-                                  style={{
-                                    width: '100%',
-                                    padding: '0.2rem 1.1rem 0.2rem 0.35rem',
-                                    background: '#0f172a',
-                                    color: '#f8fafc',
-                                    border: '1px solid rgba(52, 211, 153, 0.3)',
-                                    borderRadius: '4px',
-                                    fontSize: '0.78rem',
-                                    fontWeight: 600,
-                                    textAlign: 'right',
-                                    outline: 'none',
-                                  }}
-                                />
-                                <span style={{ position: 'absolute', right: '4px', fontSize: '0.62rem', color: '#34d399', fontWeight: 700, pointerEvents: 'none' }}>
-                                  m
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* ⚖️ Weight */}
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
-                              <span style={{ fontSize: '0.62rem', color: '#f59e0b', fontWeight: 700 }}>
-                                ⚖️ Weight
+                          {/* 📏 Meter only */}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                            <span style={{ fontSize: '0.62rem', color: '#34d399', fontWeight: 700 }}>📏 Meter</span>
+                            <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                              <input
+                                type="text"
+                                value={taka.meters}
+                                onChange={(e) => handleUpdateTakaMeters(taka.takaNo, e.target.value)}
+                                placeholder="0.00"
+                                style={{
+                                  width: '100%',
+                                  padding: '0.22rem 1.15rem 0.22rem 0.45rem',
+                                  background: '#0f172a',
+                                  color: '#f8fafc',
+                                  border: '1px solid rgba(52, 211, 153, 0.3)',
+                                  borderRadius: '4px',
+                                  fontSize: '0.78rem',
+                                  fontWeight: 600,
+                                  textAlign: 'right',
+                                  outline: 'none',
+                                }}
+                              />
+                              <span style={{ position: 'absolute', right: '5px', fontSize: '0.62rem', color: '#34d399', fontWeight: 700, pointerEvents: 'none' }}>
+                                m
                               </span>
-                              <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                                <input
-                                  type="text"
-                                  value={taka.weight || ''}
-                                  onChange={(e) => handleUpdateTakaWeight(taka.takaNo, e.target.value)}
-                                  placeholder="0"
-                                  style={{
-                                    width: '100%',
-                                    padding: '0.2rem 1.25rem 0.2rem 0.35rem',
-                                    background: '#0f172a',
-                                    color: '#f8fafc',
-                                    border: '1px solid rgba(245, 158, 11, 0.3)',
-                                    borderRadius: '4px',
-                                    fontSize: '0.78rem',
-                                    fontWeight: 600,
-                                    textAlign: 'right',
-                                    outline: 'none',
-                                  }}
-                                />
-                                <span style={{ position: 'absolute', right: '4px', fontSize: '0.62rem', color: '#f59e0b', fontWeight: 700, pointerEvents: 'none' }}>
-                                  {parseFloat(taka.weight || '0') >= 500 ? 'g' : 'kg'}
-                                </span>
-                              </div>
                             </div>
                           </div>
                         </div>
@@ -2097,7 +1934,7 @@ export const ChallanVerificationUI: React.FC = () => {
                 gap: '8px',
               }}
             >
-              🧵 Taka Details Breakdown (Meters & Weight)
+              🧵 Taka Details Breakdown (Meters)
               <span
                 style={{
                   fontSize: '0.75rem',
@@ -2112,7 +1949,7 @@ export const ChallanVerificationUI: React.FC = () => {
               </span>
             </h3>
             <p style={{ margin: '3px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
-              Individual piece meter and weight measurements extracted dynamically from the challan roll table
+              Individual piece meter measurements extracted dynamically from the challan roll table
             </p>
           </div>
 
@@ -2146,20 +1983,6 @@ export const ChallanVerificationUI: React.FC = () => {
               📏 Total Meter: {takaTotalMeters.toFixed(2)} Mtr
             </div>
 
-            <div
-              style={{
-                padding: '0.35rem 0.75rem',
-                background: 'rgba(245, 158, 11, 0.15)',
-                border: '1px solid rgba(245, 158, 11, 0.3)',
-                borderRadius: '6px',
-                fontSize: '0.8rem',
-                color: '#fbbf24',
-                fontWeight: 700,
-              }}
-            >
-              ⚖️ Total Weight: {takaTotalWeight > 0 ? `${formatWeightDisplay(takaTotalWeight)} Kg` : '0 Kg'}
-            </div>
-
             {formData['TOTAL METER'] && (
               <div
                 style={{
@@ -2191,8 +2014,6 @@ export const ChallanVerificationUI: React.FC = () => {
                 )}
               </div>
             )}
-
-
           </div>
         </div>
 
@@ -2212,7 +2033,7 @@ export const ChallanVerificationUI: React.FC = () => {
             <div style={{ position: 'relative', flex: 1, minWidth: '180px' }}>
               <input
                 type="text"
-                placeholder="🔍 Search Taka #, Meters or Weight..."
+                placeholder="🔍 Search Taka # or Meters..."
                 value={takaSearch}
                 onChange={(e) => setTakaSearch(e.target.value)}
                 style={{
@@ -2351,28 +2172,6 @@ export const ChallanVerificationUI: React.FC = () => {
               📋 Copy Takas
             </button>
 
-            {(takasList.length === 72 || takasList.length === 36) && (
-              <button
-                onClick={handleToggleMeterWeightSplit}
-                title={takasList.length === 72 ? 'Pair 6 columns into 36 Takas (Meter + Weight)' : 'Expand to 72 individual measurements'}
-                style={{
-                  padding: '0.4rem 0.75rem',
-                  background: 'rgba(168, 85, 247, 0.15)',
-                  border: '1px solid #a855f7',
-                  color: '#c084fc',
-                  borderRadius: '6px',
-                  cursor: 'pointer',
-                  fontWeight: 700,
-                  fontSize: '0.78rem',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                }}
-              >
-                {takasList.length === 72 ? '🔀 Pair M&W (36 Takas)' : '🔀 Show All 72 Mtr'}
-              </button>
-            )}
-
             <button
               onClick={() => {
                 setTakasList([]);
@@ -2447,7 +2246,6 @@ export const ChallanVerificationUI: React.FC = () => {
                 <tr style={{ background: 'rgba(15, 23, 42, 0.95)', borderBottom: '1px solid rgba(255, 255, 255, 0.15)', position: 'sticky', top: 0, zIndex: 2 }}>
                   <th style={{ padding: '0.6rem 0.8rem', textAlign: 'center', width: '80px', color: '#38bdf8', fontWeight: 800 }}>Taka #</th>
                   <th style={{ padding: '0.6rem 0.8rem', textAlign: 'left', color: '#34d399', fontWeight: 700 }}>📏 Meter (m)</th>
-                  <th style={{ padding: '0.6rem 0.8rem', textAlign: 'left', color: '#f59e0b', fontWeight: 700 }}>⚖️ Weight</th>
                   <th style={{ padding: '0.6rem 0.8rem', textAlign: 'center', width: '80px', color: '#94a3b8' }}>Actions</th>
                 </tr>
               </thead>
@@ -2456,11 +2254,7 @@ export const ChallanVerificationUI: React.FC = () => {
                   .filter((taka) => {
                     if (!takaSearch.trim()) return true;
                     const q = takaSearch.trim().toLowerCase().replace('#', '');
-                    return (
-                      taka.takaNo.toString().includes(q) ||
-                      taka.meters.toLowerCase().includes(q) ||
-                      (taka.weight && taka.weight.toLowerCase().includes(q))
-                    );
+                    return taka.takaNo.toString().includes(q) || taka.meters.toLowerCase().includes(q);
                   })
                   .map((taka, idx) => (
                     <tr
@@ -2493,7 +2287,7 @@ export const ChallanVerificationUI: React.FC = () => {
                             onChange={(e) => handleUpdateTakaMeters(taka.takaNo, e.target.value)}
                             placeholder="0.00"
                             style={{
-                              width: '90px',
+                              width: '120px',
                               padding: '0.25rem 0.45rem',
                               background: '#090d16',
                               color: '#f8fafc',
@@ -2506,31 +2300,6 @@ export const ChallanVerificationUI: React.FC = () => {
                             }}
                           />
                           <span style={{ fontSize: '0.72rem', color: '#34d399', fontWeight: 700 }}>m</span>
-                        </div>
-                      </td>
-                      <td style={{ padding: '0.45rem 0.8rem' }}>
-                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                          <input
-                            type="text"
-                            value={taka.weight || ''}
-                            onChange={(e) => handleUpdateTakaWeight(taka.takaNo, e.target.value)}
-                            placeholder="0"
-                            style={{
-                              width: '90px',
-                              padding: '0.25rem 0.45rem',
-                              background: '#090d16',
-                              color: '#f8fafc',
-                              border: '1px solid rgba(245, 158, 11, 0.3)',
-                              borderRadius: '4px',
-                              fontSize: '0.82rem',
-                              fontWeight: 600,
-                              textAlign: 'right',
-                              outline: 'none',
-                            }}
-                          />
-                          <span style={{ fontSize: '0.72rem', color: '#f59e0b', fontWeight: 700 }}>
-                            {parseFloat(taka.weight || '0') >= 500 ? 'g' : 'kg'}
-                          </span>
                         </div>
                       </td>
                       <td style={{ padding: '0.45rem 0.8rem', textAlign: 'center' }}>
@@ -2561,20 +2330,17 @@ export const ChallanVerificationUI: React.FC = () => {
                   <td style={{ padding: '0.65rem 0.8rem', color: '#34d399' }}>
                     📏 {takaTotalMeters.toFixed(2)} Mtr
                   </td>
-                  <td style={{ padding: '0.65rem 0.8rem', color: '#f59e0b' }}>
-                    ⚖️ {formatWeightDisplay(takaTotalWeight)} Kg
-                  </td>
                   <td></td>
                 </tr>
               </tfoot>
             </table>
           </div>
         ) : (
-          /* Card Grid View with Separated Inputs */
+          /* Card Grid View (Meters only) */
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(205px, 1fr))',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))',
               gap: '0.65rem',
               maxHeight: '450px',
               overflowY: 'auto',
@@ -2585,11 +2351,7 @@ export const ChallanVerificationUI: React.FC = () => {
               .filter((taka) => {
                 if (!takaSearch.trim()) return true;
                 const q = takaSearch.trim().toLowerCase().replace('#', '');
-                return (
-                  taka.takaNo.toString().includes(q) ||
-                  taka.meters.toLowerCase().includes(q) ||
-                  (taka.weight && taka.weight.toLowerCase().includes(q))
-                );
+                return taka.takaNo.toString().includes(q) || taka.meters.toLowerCase().includes(q);
               })
               .map((taka) => (
                 <div
@@ -2639,64 +2401,31 @@ export const ChallanVerificationUI: React.FC = () => {
                     </button>
                   </div>
 
-                  {/* Separated Meter & Weight inputs in Card */}
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.45rem' }}>
-                    {/* 📏 Meter */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                      <span style={{ fontSize: '0.64rem', color: '#34d399', fontWeight: 700 }}>📏 Meter</span>
-                      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                        <input
-                          type="text"
-                          value={taka.meters}
-                          onChange={(e) => handleUpdateTakaMeters(taka.takaNo, e.target.value)}
-                          placeholder="0.00"
-                          style={{
-                            width: '100%',
-                            padding: '0.22rem 1.15rem 0.22rem 0.35rem',
-                            background: '#0f172a',
-                            color: '#f8fafc',
-                            border: '1px solid rgba(52, 211, 153, 0.3)',
-                            borderRadius: '4px',
-                            fontSize: '0.8rem',
-                            fontWeight: 600,
-                            textAlign: 'right',
-                            outline: 'none',
-                          }}
-                        />
-                        <span style={{ position: 'absolute', right: '4px', fontSize: '0.62rem', color: '#34d399', fontWeight: 700, pointerEvents: 'none' }}>
-                          m
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* ⚖️ Weight */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                      <span style={{ fontSize: '0.64rem', color: '#f59e0b', fontWeight: 700 }}>
-                        ⚖️ Weight
+                  {/* 📏 Meter only */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                    <span style={{ fontSize: '0.64rem', color: '#34d399', fontWeight: 700 }}>📏 Meter</span>
+                    <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                      <input
+                        type="text"
+                        value={taka.meters}
+                        onChange={(e) => handleUpdateTakaMeters(taka.takaNo, e.target.value)}
+                        placeholder="0.00"
+                        style={{
+                          width: '100%',
+                          padding: '0.22rem 1.15rem 0.22rem 0.45rem',
+                          background: '#0f172a',
+                          color: '#f8fafc',
+                          border: '1px solid rgba(52, 211, 153, 0.3)',
+                          borderRadius: '4px',
+                          fontSize: '0.8rem',
+                          fontWeight: 600,
+                          textAlign: 'right',
+                          outline: 'none',
+                        }}
+                      />
+                      <span style={{ position: 'absolute', right: '5px', fontSize: '0.62rem', color: '#34d399', fontWeight: 700, pointerEvents: 'none' }}>
+                        m
                       </span>
-                      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                        <input
-                          type="text"
-                          value={taka.weight || ''}
-                          onChange={(e) => handleUpdateTakaWeight(taka.takaNo, e.target.value)}
-                          placeholder="0"
-                          style={{
-                            width: '100%',
-                            padding: '0.22rem 1.3rem 0.22rem 0.35rem',
-                            background: '#0f172a',
-                            color: '#f8fafc',
-                            border: '1px solid rgba(245, 158, 11, 0.3)',
-                            borderRadius: '4px',
-                            fontSize: '0.8rem',
-                            fontWeight: 600,
-                            textAlign: 'right',
-                            outline: 'none',
-                          }}
-                        />
-                        <span style={{ position: 'absolute', right: '4px', fontSize: '0.62rem', color: '#f59e0b', fontWeight: 700, pointerEvents: 'none' }}>
-                          {parseFloat(taka.weight || '0') >= 500 ? 'g' : 'kg'}
-                        </span>
-                      </div>
                     </div>
                   </div>
                 </div>

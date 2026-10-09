@@ -1086,7 +1086,7 @@ export function parseChallanDocument(
       val = orderNumber;
     } else if (norm.includes('takadetail') || norm.includes('taka') || norm.includes('piecesdetail') || norm.includes('piecedetail')) {
       val = takas.length > 0
-        ? `${takas.length} Takas (${(parseFloat(totalMeter || '0') || sumMeters).toFixed(2)} Mtr${totalWeight ? `, ${totalWeight}` : ''})`
+        ? `${takas.length} Takas (${(parseFloat(totalMeter || '0') || sumMeters).toFixed(2)} Mtr)`
         : null;
     } else {
       const regex = new RegExp(`(?:${title})[^\\d\\r\\n]*([^:\\r\\n]+)`, 'i');
