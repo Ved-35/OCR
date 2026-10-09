@@ -106,6 +106,7 @@ export interface ChallanExtractRequest {
   fileUrl: string;
   customSchema?: any;
   fileName?: string;
+  apiKey?: string;
 }
 
 export const extractChallanOcrData = async (
@@ -135,9 +136,14 @@ export const extractChallanOcrData = async (
 export const extractChallanAiOcrData = async (
   reqPayload: ChallanExtractRequest,
 ): Promise<OcrExtractResponse> => {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (reqPayload.apiKey?.trim()) {
+    headers['x-gemini-api-key'] = reqPayload.apiKey.trim();
+  }
+
   const response = await fetch(`${API_BASE}/ocr/challan-ai`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(reqPayload),
   });
 

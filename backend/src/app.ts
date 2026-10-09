@@ -29,6 +29,7 @@ export const createApp = (): Express => {
       return callback(null, true);
     },
     credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-gemini-api-key', 'X-Requested-With'],
   }));
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));

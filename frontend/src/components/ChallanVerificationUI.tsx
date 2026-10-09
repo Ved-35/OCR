@@ -193,6 +193,30 @@ export const ChallanVerificationUI: React.FC = () => {
   const [isAiExtracting, setIsAiExtracting] = useState<boolean>(false);
   const [ocrToast, setOcrToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
+  // Gemini API Key state (optional custom key, stored in localStorage)
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => {
+    try {
+      return localStorage.getItem('gemini_api_key') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [showKeyInput, setShowKeyInput] = useState<boolean>(false);
+  const [showKeySecret, setShowKeySecret] = useState<boolean>(false);
+
+  const handleApiKeyChange = (val: string) => {
+    setGeminiApiKey(val);
+    try {
+      if (val.trim()) {
+        localStorage.setItem('gemini_api_key', val.trim());
+      } else {
+        localStorage.removeItem('gemini_api_key');
+      }
+    } catch {
+      // ignore storage errors
+    }
+  };
+
   // Right column tab state: 'fields' vs 'takas'
   const [activeRightTab, setActiveRightTab] = useState<'fields' | 'takas'>('fields');
   const [takaViewMode, setTakaViewMode] = useState<'grid' | 'table'>('grid');
@@ -831,7 +855,12 @@ export const ChallanVerificationUI: React.FC = () => {
   // ─── AI OCR Handler (Gemini Vision) ────────────────────────────────────────
   const handleFetchChallanAiOcrData = async () => {
     setIsAiExtracting(true);
-    setOcrToast({ message: '🤖 Running Gemini AI OCR extraction...', type: 'info' });
+    setOcrToast({
+      message: geminiApiKey.trim()
+        ? '🤖 Running Gemini AI OCR (using custom API key)...'
+        : '🤖 Running Gemini AI OCR (using backend ENV key)...',
+      type: 'info',
+    });
 
     try {
       let finalUrl = uploadedDocUrl;
@@ -855,6 +884,7 @@ export const ChallanVerificationUI: React.FC = () => {
         fileUrl: finalUrl,
         customSchema: fieldsList,
         fileName: uploadedFileName,
+        apiKey: geminiApiKey.trim() || undefined,
       });
 
       if (result.success && result.fields) {
@@ -921,8 +951,16 @@ export const ChallanVerificationUI: React.FC = () => {
         });
       }
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'AI extraction request failed';
+      if (
+        errMsg.toLowerCase().includes('gemini') ||
+        errMsg.toLowerCase().includes('api_key') ||
+        errMsg.toLowerCase().includes('key')
+      ) {
+        setShowKeyInput(true);
+      }
       setOcrToast({
-        message: `❌ AI OCR Error: ${err instanceof Error ? err.message : 'AI extraction request failed'}`,
+        message: `❌ AI OCR Error: ${errMsg}`,
         type: 'error',
       });
     } finally {
@@ -1184,8 +1222,165 @@ export const ChallanVerificationUI: React.FC = () => {
               >
                 {isAiExtracting ? '⏳ AI Extracting...' : '🤖 AI OCR'}
               </button>
+
+              <button
+                type="button"
+                onClick={() => setShowKeyInput(!showKeyInput)}
+                title={geminiApiKey ? 'Custom Gemini API Key active (click to change or reset)' : 'Click to enter custom Gemini API Key'}
+                style={{
+                  padding: '0.4rem 0.8rem',
+                  background: geminiApiKey ? 'rgba(16, 185, 129, 0.18)' : 'rgba(168, 85, 247, 0.15)',
+                  border: geminiApiKey ? '1px solid #10b981' : '1px solid rgba(168, 85, 247, 0.4)',
+                  color: geminiApiKey ? '#34d399' : '#c084fc',
+                  borderRadius: '6px',
+                  cursor: 'pointer',
+                  fontWeight: 700,
+                  fontSize: '0.8rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  boxShadow: geminiApiKey ? '0 0 10px rgba(16, 185, 129, 0.25)' : 'none',
+                  transition: 'all 0.2s ease',
+                }}
+              >
+                <span>🔑</span>
+                <span>{geminiApiKey ? 'Custom Key' : 'Gemini Key'}</span>
+                <span
+                  style={{
+                    fontSize: '0.65rem',
+                    padding: '1px 5px',
+                    borderRadius: '4px',
+                    background: geminiApiKey ? '#059669' : '#475569',
+                    color: '#fff',
+                    fontWeight: 800,
+                  }}
+                >
+                  {geminiApiKey ? 'CUSTOM' : 'ENV'}
+                </span>
+              </button>
             </div>
           </div>
+
+          {/* Collapsible / Expandable Gemini Key Configuration Panel */}
+          {showKeyInput && (
+            <div
+              style={{
+                marginBottom: '0.75rem',
+                padding: '0.75rem 1rem',
+                background: 'rgba(15, 23, 42, 0.95)',
+                border: geminiApiKey ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(168, 85, 247, 0.35)',
+                borderRadius: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '0.5rem',
+                boxShadow: '0 4px 20px rgba(0, 0, 0, 0.35)',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '0.9rem' }}>🔑</span>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 700, color: geminiApiKey ? '#34d399' : '#c084fc' }}>
+                    Gemini API Key Configuration
+                  </span>
+                  <span
+                    style={{
+                      fontSize: '0.7rem',
+                      padding: '2px 6px',
+                      borderRadius: '4px',
+                      background: geminiApiKey ? 'rgba(16, 185, 129, 0.2)' : 'rgba(148, 163, 184, 0.15)',
+                      color: geminiApiKey ? '#34d399' : '#94a3b8',
+                      border: geminiApiKey ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(148, 163, 184, 0.2)',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {geminiApiKey ? '● Using Frontend Key' : '○ Using Backend ENV Key'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                  {geminiApiKey && (
+                    <button
+                      type="button"
+                      onClick={() => handleApiKeyChange('')}
+                      style={{
+                        padding: '0.25rem 0.6rem',
+                        background: 'rgba(239, 68, 68, 0.15)',
+                        border: '1px solid rgba(239, 68, 68, 0.35)',
+                        color: '#f87171',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontSize: '0.72rem',
+                        fontWeight: 600,
+                      }}
+                      title="Clear custom key and use backend ENV"
+                    >
+                      ↺ Reset to Backend ENV
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowKeyInput(false)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#94a3b8',
+                      cursor: 'pointer',
+                      fontSize: '1rem',
+                      lineHeight: '1',
+                      padding: '0 4px',
+                    }}
+                    title="Close"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <div style={{ position: 'relative', flex: 1 }}>
+                  <input
+                    type={showKeySecret ? 'text' : 'password'}
+                    value={geminiApiKey}
+                    onChange={(e) => handleApiKeyChange(e.target.value)}
+                    placeholder="Enter custom Gemini API key (optional — leave empty for backend ENV)"
+                    style={{
+                      width: '100%',
+                      padding: '0.5rem 2.4rem 0.5rem 0.75rem',
+                      background: '#030712',
+                      border: geminiApiKey ? '1px solid #10b981' : '1px solid rgba(255, 255, 255, 0.15)',
+                      borderRadius: '6px',
+                      color: '#f8fafc',
+                      fontSize: '0.8rem',
+                      fontFamily: 'monospace',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowKeySecret(!showKeySecret)}
+                    style={{
+                      position: 'absolute',
+                      right: '8px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      color: '#94a3b8',
+                      cursor: 'pointer',
+                      fontSize: '0.9rem',
+                    }}
+                    title={showKeySecret ? 'Hide Key' : 'Show Key'}
+                  >
+                    {showKeySecret ? '🙈' : '👁️'}
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ fontSize: '0.72rem', color: geminiApiKey ? '#10b981' : '#94a3b8' }}>
+                {geminiApiKey
+                  ? '🔒 Custom key saved in browser localStorage. AI OCR requests will use this key.'
+                  : '💡 When empty, AI OCR automatically uses the GEMINI_API_KEY from your backend .env file.'}
+              </div>
+            </div>
+          )}
 
 
           <div

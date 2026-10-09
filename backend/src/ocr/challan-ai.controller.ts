@@ -16,7 +16,19 @@ export const extractChallanAiOcr = async (req: Request, res: Response): Promise<
   const requestId = `challan-ai-${Date.now()}`;
   console.log(`[ChallanAiController] [${requestId}] Received Gemini AI OCR extraction request`);
 
-  const { fileUrl, customSchema, fileName } = req.body;
+  const { fileUrl, customSchema, fileName, apiKey } = req.body;
+  const headerApiKey = req.headers['x-gemini-api-key'] as string | undefined;
+  const effectiveApiKey = (typeof apiKey === 'string' && apiKey.trim())
+    ? apiKey.trim()
+    : (typeof headerApiKey === 'string' && headerApiKey.trim())
+    ? headerApiKey.trim()
+    : undefined;
+
+  if (effectiveApiKey) {
+    console.log(`[ChallanAiController] [${requestId}] Using frontend-supplied Gemini API key (prefix: ${effectiveApiKey.slice(0, 6)}...)`);
+  } else {
+    console.log(`[ChallanAiController] [${requestId}] No frontend key provided; falling back to backend ENV GEMINI_API_KEY`);
+  }
 
   if (!fileUrl || typeof fileUrl !== 'string') {
     res.status(400).json({
@@ -34,6 +46,7 @@ export const extractChallanAiOcr = async (req: Request, res: Response): Promise<
     fileUrl,
     customSchema,
     fileName,
+    apiKey: effectiveApiKey,
   };
 
   const result = await extractChallanWithAi(request);

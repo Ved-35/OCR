@@ -23,6 +23,7 @@ export interface ChallanAiExtractRequest {
   fileUrl: string;
   customSchema?: any;
   fileName?: string;
+  apiKey?: string;
 }
 
 // ─── Gemini Prompt Construction ──────────────────────────────────────────────
@@ -260,9 +261,11 @@ export async function extractChallanWithAi(
     let responseText = '';
     let lastError: Error | null = null;
 
-    const apiKey = getGeminiApiKey();
+    const apiKey = request.apiKey?.trim() || getGeminiApiKey();
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY is not configured. Please add GEMINI_API_KEY to your backend/.env file.');
+      throw new Error(
+        'Gemini API Key is not configured. Please enter your key in the frontend input or add GEMINI_API_KEY to your backend .env file.',
+      );
     }
 
     const imageBase64 = imageBuffer.toString('base64');
