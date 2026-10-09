@@ -9,8 +9,25 @@ export const createApp = (): Express => {
   const app = express();
 
   // Core Middleware
+  const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'https://billocr.netlify.app',
+    ...(config.clientOrigin ? config.clientOrigin.split(',').map((o) => o.trim()) : []),
+  ];
+
   app.use(cors({
-    origin: config.clientOrigin,
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (
+        allowedOrigins.includes(origin) ||
+        origin.endsWith('.netlify.app') ||
+        process.env.NODE_ENV !== 'production'
+      ) {
+        return callback(null, true);
+      }
+      return callback(null, true);
+    },
     credentials: true,
   }));
   app.use(express.json({ limit: '50mb' }));
