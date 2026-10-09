@@ -45,4 +45,27 @@ if (fs.existsSync(path.dirname(path.dirname(v6DarwinX64Dir))) && fs.existsSync(v
   console.log('[fix-deps] Provided fallback onnxruntime_binding.node for darwin/x64 napi-v6.');
 }
 
+// 4. Fix extensionless ESM imports in ppu-paddle-ocr so Node ESM finds modules on Linux
+const paddleOcrDir = path.join(backendDir, 'node_modules/ppu-paddle-ocr');
+function fixPaddleOcrImports(dir) {
+  if (!fs.existsSync(dir)) return;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      fixPaddleOcrImports(full);
+    } else if (entry.name.endsWith('.js')) {
+      let content = fs.readFileSync(full, 'utf8');
+      const updated = content.replace(/from\s*(["\x27])(\.[^"\x27]+?)\1/g, (match, q, rel) => {
+        if (rel.endsWith('.js') || rel.endsWith('.json')) return match;
+        return `from${q}${rel}.js${q}`;
+      });
+      if (updated !== content) {
+        fs.writeFileSync(full, updated);
+      }
+    }
+  }
+}
+fixPaddleOcrImports(paddleOcrDir);
+console.log('[fix-deps] Verified and patched ppu-paddle-ocr ESM imports.');
+
 console.log('[fix-deps] Dependency fixes applied successfully.');
