@@ -21,7 +21,7 @@ export interface Item {
   createdAt: string;
 }
 
-const API_BASE = 'https://s07xmw60-5000.inc1.devtunnels.ms/api';
+const API_BASE = 'https://ocr-agxm.onrender.com/api';
 
 export const fetchHealth = async (): Promise<HealthResponse> => {
   const response = await fetch(`${API_BASE}/health`);
