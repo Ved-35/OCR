@@ -51,10 +51,15 @@ export async function preprocessForOcr(buffer: Buffer, angle: number = 0): Promi
   let pipe = sharp(buffer);
   pipe = angle !== 0 ? pipe.rotate(angle) : pipe.rotate(); // auto-EXIF or explicit angle
   const meta = await pipe.metadata();
-  if (meta.width && meta.width < 1800) {
-    const scale = Math.min(3.5, Math.max(1.5, 1800 / meta.width));
+
+  // Clamp max dimensions to prevent memory spikes on constrained containers (Render 512MB)
+  if (meta.width && meta.width > 1500) {
+    pipe = pipe.resize({ width: 1500, fit: 'inside', withoutEnlargement: true });
+  } else if (meta.width && meta.width < 900) {
+    const scale = Math.min(2.0, Math.max(1.2, 1100 / meta.width));
     pipe = pipe.resize({ width: Math.round(meta.width * scale), kernel: 'lanczos3' });
   }
+
   if (meta.channels && meta.channels >= 3) {
     // Green channel makes both red ink and dark/blue ink distinct and dark on light paper
     return pipe.extractChannel('green').linear(1.3, -20).sharpen().png().toBuffer();
@@ -92,8 +97,15 @@ async function recognizeWithLines(imageBuffer: Buffer): Promise<OcrLinesResult> 
       const buf = await preprocessForOcr(imageBuffer, angle);
       const result = await service.recognize(buf.buffer as ArrayBuffer);
       const text = result.text ?? '';
-      results.push({ angle, text, score: scoreText(text), lines: result.lines });
-      console.log(`[ChallanService] Angle ${angle}°: score=${scoreText(text).toFixed(0)}, len=${text.length}`);
+      const score = scoreText(text);
+      results.push({ angle, text, score, lines: result.lines });
+      console.log(`[ChallanService] Angle ${angle}°: score=${score.toFixed(0)}, len=${text.length}`);
+
+      // Early exit if primary angle extracted confident document text (saves ~75% CPU and RAM on Render)
+      if (score >= 120 || (text.length > 250 && score >= 80)) {
+        console.log(`[ChallanService] Confident result at ${angle}° (score ${score.toFixed(0)}), skipping remaining angles to preserve memory.`);
+        break;
+      }
     } catch (e) {
       console.warn(`[ChallanService] OCR at ${angle}° failed:`, e);
     }
@@ -156,10 +168,16 @@ export async function extractChallanDocument(
       pageCount = pdfResult.pages;
       console.log(`[ChallanService] PDF processed: ${pageCount} pages`);
     } else {
-      const ocrResult = await recognizeWithLines(buffer);
-      rawText = ocrResult.text;
-      ocrLines = ocrResult.lines;
-      console.log(`[ChallanService] PaddleOCR complete: ${rawText.length} chars, ${ocrLines.length} line groups`);
+      try {
+        const ocrResult = await recognizeWithLines(buffer);
+        rawText = ocrResult.text;
+        ocrLines = ocrResult.lines;
+        console.log(`[ChallanService] PaddleOCR complete: ${rawText.length} chars, ${ocrLines.length} line groups`);
+      } catch (paddleErr) {
+        console.warn('[ChallanService] PaddleOCR failed; falling back to Gemini Vision AI...', paddleErr);
+        const { extractChallanWithAi } = await import('./challan-ai.service.js');
+        return await extractChallanWithAi(request);
+      }
     }
 
     console.log(`\n=================== [CHALLAN BILL OCR TEXT] ===================`);
@@ -217,16 +235,22 @@ export async function extractChallanDocument(
   } catch (err: unknown) {
     const error = err as Error & { statusCode?: number };
     const processingTimeMs = Date.now() - startTime;
-    console.error(`[ChallanService] Failed after ${processingTimeMs}ms:`, error.message);
-    return {
-      success: false,
-      text: '',
-      fields: {},
-      pages: 0,
-      processingTimeMs,
-      documentType: 'DELIVERY_CHALLAN' as any,
-      error: error.message,
-    };
+    console.warn(`[ChallanService] Local processing failed (${error.message}); attempting Gemini AI fallback...`);
+    try {
+      const { extractChallanWithAi } = await import('./challan-ai.service.js');
+      return await extractChallanWithAi(request);
+    } catch {
+      console.error(`[ChallanService] Failed after ${processingTimeMs}ms:`, error.message);
+      return {
+        success: false,
+        text: '',
+        fields: {},
+        pages: 0,
+        processingTimeMs,
+        documentType: 'DELIVERY_CHALLAN' as any,
+        error: error.message,
+      };
+    }
   } finally {
     if (tempFilePath) cleanupFile(tempFilePath);
   }

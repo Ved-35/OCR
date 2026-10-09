@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "tsx --watch src/index.ts",
     "build": "yarn install --production=false && tsc",
-    "start": "node --experimental-specifier-resolution=node dist/index.js",
+    "start": "node --max-old-space-size=400 --experimental-specifier-resolution=node dist/index.js",
     "lint": "tsc --noEmit",
     "postinstall": "node scripts/fix-deps.js"
   },
