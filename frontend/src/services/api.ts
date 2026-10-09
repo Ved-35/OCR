@@ -127,3 +127,28 @@ export const extractChallanOcrData = async (
 
   return response.json();
 };
+
+/**
+ * Dedicated Challan AI OCR Extraction API (Gemini Vision)
+ * POST /api/ocr/challan-ai
+ */
+export const extractChallanAiOcrData = async (
+  reqPayload: ChallanExtractRequest,
+): Promise<OcrExtractResponse> => {
+  const response = await fetch(`${API_BASE}/ocr/challan-ai`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(reqPayload),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(
+      (errorData as { error?: string }).error ||
+        `AI OCR extraction failed: ${response.statusText}`,
+    );
+  }
+
+  return response.json();
+};
+

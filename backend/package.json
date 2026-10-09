@@ -8,10 +8,12 @@
     "dev": "tsx --watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "postinstall": "node scripts/fix-deps.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
+    "@google/generative-ai": "^0.24.1",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.1.29",
     "@nestjs/core": "^11.1.29",
@@ -44,6 +46,9 @@
     "ppu-paddle-ocr": {
       "onnxruntime-node": "1.20.1"
     }
+  },
+  "resolutions": {
+    "onnxruntime-node": "1.20.1"
   },
   "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }

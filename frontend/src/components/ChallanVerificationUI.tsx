@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { extractChallanOcrData } from '../services/api';
+import { extractChallanOcrData, extractChallanAiOcrData } from '../services/api';
 
 /** Default 13 Challan Bill Schema including Supplier & Recipient Addresses */
 const DEFAULT_CHALLAN_SCHEMA = [
@@ -190,6 +190,7 @@ export const ChallanVerificationUI: React.FC = () => {
   // Form extraction state
   const [formData, setFormData] = useState<Record<string, string>>({});
   const [isExtracting, setIsExtracting] = useState<boolean>(false);
+  const [isAiExtracting, setIsAiExtracting] = useState<boolean>(false);
   const [ocrToast, setOcrToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   // Right column tab state: 'fields' vs 'takas'
@@ -827,6 +828,108 @@ export const ChallanVerificationUI: React.FC = () => {
     }
   };
 
+  // ─── AI OCR Handler (Gemini Vision) ────────────────────────────────────────
+  const handleFetchChallanAiOcrData = async () => {
+    setIsAiExtracting(true);
+    setOcrToast({ message: '🤖 Running Gemini AI OCR extraction...', type: 'info' });
+
+    try {
+      let finalUrl = uploadedDocUrl;
+      if (finalUrl.startsWith('/') && !finalUrl.startsWith('data:')) {
+        try {
+          const res = await fetch(finalUrl);
+          if (res.ok) {
+            const blob = await res.blob();
+            finalUrl = await new Promise<string>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.readAsDataURL(blob);
+            });
+          }
+        } catch {
+          // Fallback to sending path
+        }
+      }
+
+      const result = await extractChallanAiOcrData({
+        fileUrl: finalUrl,
+        customSchema: fieldsList,
+        fileName: uploadedFileName,
+      });
+
+      if (result.success && result.fields) {
+        if (result.takas && Array.isArray(result.takas)) {
+          setTakasList(result.takas);
+        }
+
+        const updated: Record<string, string> = {};
+        let count = 0;
+
+        for (const [extractedKey, val] of Object.entries(result.fields)) {
+          if (!val) continue;
+
+          const normKey = extractedKey.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+          let matchedField = fieldsList.find(
+            (f) => f.title.toLowerCase().replace(/[^a-z0-9]/g, '') === normKey
+          );
+
+          if (!matchedField) {
+            matchedField = fieldsList.find((f) => {
+              const normTitle = f.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+              return normTitle.includes(normKey) || normKey.includes(normTitle);
+            });
+          }
+
+          if (matchedField) {
+            const fieldTitle = matchedField.title;
+            if (matchedField.type === 'date') {
+              if (/^\d{2}[\/\-\.]\d{2}[\/\-\.]\d{4}$/.test(val)) {
+                const parts = val.split(/[\/\-\.]/);                updated[fieldTitle] = `${parts[2]}-${parts[1]}-${parts[0]}`;
+              } else if (/^\d{2}[\/\-\.]\d{2}[\/\-\.]\d{2}$/.test(val)) {
+                const parts = val.split(/[\/\-\.]/);                const yr = parseInt(parts[2], 10) > 50 ? `19${parts[2]}` : `20${parts[2]}`;
+                updated[fieldTitle] = `${yr}-${parts[1]}-${parts[0]}`;
+              } else if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+                updated[fieldTitle] = val;
+              } else {
+                updated[fieldTitle] = val;
+              }
+            } else {
+              updated[fieldTitle] = val;
+            }
+            count++;
+          }
+        }
+
+        if (result.takas && Array.isArray(result.takas) && result.takas.length > 0) {
+          const sumM = result.takas.reduce((acc, t) => acc + (parseFloat(t.meters) || 0), 0);
+          const sumW = result.takas.reduce((acc, t) => acc + (parseFloat(t.weight || '0') || 0), 0);
+          updated['TAKA DETAILS'] = sumW > 0
+            ? `${result.takas.length} Takas (${sumM.toFixed(2)} Mtr, ${formatWeightDisplay(sumW)} Kg)`
+            : `${result.takas.length} Takas (${sumM.toFixed(2)} Mtr)`;
+        }
+
+        setFormData(updated);
+        setOcrToast({
+          message: `✅ AI Extracted ${count} challan fields & ${result.takas ? result.takas.length : 0} Takas in ${result.processingTimeMs}ms!`,
+          type: 'success',
+        });
+      } else {
+        setOcrToast({
+          message: `❌ AI Extraction Failed: ${result.error || 'Unknown error'}`,
+          type: 'error',
+        });
+      }
+    } catch (err) {
+      setOcrToast({
+        message: `❌ AI OCR Error: ${err instanceof Error ? err.message : 'AI extraction request failed'}`,
+        type: 'error',
+      });
+    } finally {
+      setIsAiExtracting(false);
+    }
+  };
+
   const isPdf = uploadedDocUrl.includes('application/pdf') || uploadedFileName.toLowerCase().endsWith('.pdf');
 
   return (
@@ -1057,6 +1160,29 @@ export const ChallanVerificationUI: React.FC = () => {
                 }}
               >
                 {isExtracting ? '⏳ Extracting...' : '🔍 EXTRACT WITH OCR'}
+              </button>
+
+              <button
+                onClick={handleFetchChallanAiOcrData}
+                disabled={isAiExtracting}
+                style={{
+                  padding: '0.4rem 1rem',
+                  background: isAiExtracting
+                    ? '#475569'
+                    : 'linear-gradient(135deg, #a855f7, #6366f1)',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: '6px',
+                  cursor: isAiExtracting ? 'not-allowed' : 'pointer',
+                  fontWeight: 700,
+                  fontSize: '0.8rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  boxShadow: isAiExtracting ? 'none' : '0 2px 10px rgba(168, 85, 247, 0.4)',
+                }}
+              >
+                {isAiExtracting ? '⏳ AI Extracting...' : '🤖 AI OCR'}
               </button>
             </div>
           </div>
